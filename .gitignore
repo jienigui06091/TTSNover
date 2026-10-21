@@ -1,0 +1,23 @@
+# 运行时数据（书籍、书源库、朗读音频缓存、设置里的 TTS key）
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+srce/node_modules/
+npm-debug.log*
+
+# 本地环境与凭据
+.env
+.env.*
+*.local
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
