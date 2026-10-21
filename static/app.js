@@ -22,7 +22,12 @@ const DEFAULTS = {
     voice: '',
     speed: 1.18,
     proxy: 'http://127.0.0.1:7890',
-    autoNext: true
+    autoNext: true,
+    provider: '',            // mimo 等走专用协议的服务商
+    model: '',
+    style: '',
+    clientSpeed: false,      // true = 语速由前端 playbackRate 控制，改速不重新合成
+    profiles: {}             // 每个服务商各存一份配置
   }
 };
 
@@ -32,7 +37,7 @@ let previewing = false;
 let chunks = [];            // 已拼接进正文的章节块（连续阅读）
 let prefetched = new Map(); // idx -> 已提前取回的章节数据
 let appending = false, endMarked = false;
-let presets = {};
+let presets = {}, mimoVoices = [], mimoReady = false;
 let saveTimer = null;
 let shelfBooksList = [];    // 书架本地缓存列表，用于即时搜索过滤
 let sourcesList = [];       // 书源列表缓存
@@ -783,7 +788,10 @@ async function getAudio(text) {
   const r = await fetch('/api/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice: S.tts.voice, speed: S.tts.speed })
+    body: JSON.stringify({
+      text, voice: S.tts.voice, speed: S.tts.speed,
+      provider: S.tts.provider || '', model: S.tts.model || '', style: S.tts.style || ''
+    })
   });
   if (!r.ok) {
     let msg = 'HTTP ' + r.status;
@@ -794,6 +802,13 @@ async function getAudio(text) {
   const url = URL.createObjectURL(blob);
   audioCache.set(text, url);
   return url;
+}
+
+/* 语速：小米这类服务端不吃 speed 的，用前端 playbackRate 变速（不重新合成） */
+function applyPlaybackRate() {
+  const sp = Math.max(0.5, Math.min(2, +S.tts.speed || 1));
+  audioEl.preservesPitch = true;
+  audioEl.playbackRate = S.tts.clientSpeed ? sp : 1;
 }
 
 let ttsErrs = 0;
@@ -816,6 +831,7 @@ async function speakHttp(text) {
     return;
   }
   audioEl.src = url;
+  applyPlaybackRate();
   try {
     await audioEl.play();
   } catch (e) {
@@ -928,6 +944,7 @@ function fillSetForm() {
 
   $('#ttsPreset').innerHTML = Object.entries(presets)
     .map(([k, p]) => `<option value="${k}">${escapeHtml(p.name)}</option>`).join('');
+  $('#ttsPreset').value = currentPresetKey();
   $('#ttsEngine').value = S.tts.engine;
   $('#ttsUrl').value = S.tts.url || '';
   $('#ttsMethod').value = S.tts.method || 'POST';
@@ -942,15 +959,64 @@ function fillSetForm() {
   const ac = $('#autoCh');
   if (ac) ac.checked = S.autoCh !== false;
   $('#webVoiceRow').classList.toggle('hide', S.tts.engine !== 'web');
+  fillMimoForm();
+}
+
+/* 当前生效的是哪个预设（给下拉选值、以及按服务商各存一份配置） */
+function currentPresetKey() {
+  if (S.tts.engine === 'web') return 'web';
+  if (S.tts.provider === 'mimo') return 'mimo';
+  const u = S.tts.url || '';
+  if (/fish\.audio/.test(u)) return 'fish';
+  if (/siliconflow/.test(u)) return 'siliconflow';
+  if (/speech\.microsoft/.test(u)) return 'azure';
+  if (/audio\/speech/.test(u)) return 'openai';
+  return '';
+}
+
+/* 小米面板：预置音色下拉 + 风格 + Key 状态 */
+function fillMimoForm() {
+  const on = S.tts.provider === 'mimo';
+  $('#mimoBox').classList.toggle('hide', !on);
+  if (!on) return;
+  const sel = $('#mimoVoiceSel');
+  if (!sel.dataset.filled && mimoVoices.length) {
+    sel.innerHTML = mimoVoices.map((v) => {
+      const meta = [v.lang, v.gender].filter(Boolean).join(' · ');
+      return `<option value="${escapeHtml(v.id)}">${escapeHtml(v.name)}${meta ? '（' + escapeHtml(meta) + '）' : ''}</option>`;
+    }).join('');
+    sel.dataset.filled = '1';
+  }
+  const want = S.tts.voice || 'mimo_default';
+  sel.value = want;
+  if (!sel.value) sel.value = 'mimo_default';
+  $('#mimoStyle').value = S.tts.style || '';
+  $('#mimoKeyState').textContent = mimoReady
+    ? '✓ 服务端已配置 Key（存 data/mimo.key，前端拿不到、不进 Git）'
+    : '⚠ 服务端还没有 Key：粘贴到上面输入框，点「保存」写入';
 }
 
 function applyPreset(key) {
   const p = presets[key];
   if (!p) return;
-  S.tts.url = p.url; S.tts.method = p.method; S.tts.headers = p.headers;
-  S.tts.body = p.body; S.tts.proxy = p.proxy || '';
-  if (p.voice) S.tts.voice = p.voice;
-  if (p.speed) S.tts.speed = p.speed;
+  // 每个服务商各存一份：切过去先看有没有存过（Fish 的 key、音色不会因为切走而丢）
+  const saved = (S.tts.profiles || {})[key];
+  const src = Object.assign({}, p, saved || {});
+  S.tts.url = src.url || '';
+  S.tts.method = src.method || 'POST';
+  S.tts.headers = src.headers || '';
+  S.tts.body = src.body || '';
+  S.tts.proxy = src.proxy != null ? src.proxy : '';
+  S.tts.provider = src.provider || '';
+  S.tts.model = src.model || '';
+  S.tts.style = src.style || '';
+  S.tts.clientSpeed = !!src.clientSpeed;
+  S.tts.voice = src.voice || '';
+  if (saved) {
+    if (saved.speed) S.tts.speed = saved.speed;
+  } else if (p.speed && !p.keepSpeed) {
+    S.tts.speed = p.speed;
+  }
   S.tts.engine = key === 'web' ? 'web' : 'http';
   fillSetForm();
   $('#presetNote').textContent = p.note || '';
@@ -1408,6 +1474,7 @@ function bind() {
     $('#speedVal').textContent = next.toFixed(2);
     $('#ttsSpeed').value = next;
     $('#capsuleSpeedText').textContent = next.toFixed(2) + 'x';
+    if (S.tts.clientSpeed) applyPlaybackRate();
     saveSettings();
     toast(`语速调整为 ${next.toFixed(2)}x`);
   };
@@ -1416,6 +1483,7 @@ function bind() {
     S.tts.speed = +e.target.value;
     $('#speedVal').textContent = S.tts.speed.toFixed(2);
     $('#capsuleSpeedText').textContent = S.tts.speed.toFixed(2) + 'x';
+    if (S.tts.clientSpeed) applyPlaybackRate();   // 小米：正在播的这句立刻变速
     saveSettings();
   };
 
@@ -1428,6 +1496,7 @@ function bind() {
       $('#ttsSpeed').value = sp;
       $('#capsuleSpeedText').textContent = sp.toFixed(2) + 'x';
       $$('.speed-pill').forEach((x) => x.classList.toggle('active', x === btn));
+      if (S.tts.clientSpeed) applyPlaybackRate();
       saveSettings();
     };
   });
@@ -1437,6 +1506,10 @@ function bind() {
     $('#webVoiceRow').classList.toggle('hide', S.tts.engine !== 'web');
     saveSettings();
   };
+  // 选预设 → 套用该服务商配置（原来这个下拉没绑事件，选了没反应）
+  $('#ttsPreset').onchange = (e) => applyPreset(e.target.value);
+  // 选小米预置音色 → 填进「音色 ID」，手填仍可覆盖
+  $('#mimoVoiceSel').onchange = (e) => { $('#ttsVoice').value = e.target.value; };
   $('#btnTtsCfg').onclick = () => { setTtsPanel(false); openSet('tts'); };
 
   // 排版步进器
@@ -1485,9 +1558,35 @@ function bind() {
     S.tts.body = $('#ttsBody').value;
     S.tts.voice = $('#ttsVoice').value.trim();
     S.tts.proxy = $('#ttsProxy').value.trim();
+    if (S.tts.provider === 'mimo') {
+      S.tts.style = $('#mimoStyle').value.trim();
+      const k = $('#mimoKeyInput').value.trim();
+      if (k) {
+        try {
+          const r = await api('/api/tts/key', { method: 'POST', body: JSON.stringify({ key: k }) });
+          mimoReady = !!r.ready;
+          $('#mimoKeyInput').value = '';
+          $('#mimoKeyState').textContent = '✓ 服务端已配置 Key（存 data/mimo.key，前端拿不到、不进 Git）';
+          toast('小米 Key 已写入服务端', 'ok');
+        } catch (e) {
+          toast('Key 保存失败：' + e.message, 'err', 4000);
+        }
+      }
+    }
+    const pk = currentPresetKey();
+    if (pk) {
+      S.tts.profiles = Object.assign({}, S.tts.profiles || {});
+      S.tts.profiles[pk] = {
+        url: S.tts.url, method: S.tts.method, headers: S.tts.headers, body: S.tts.body,
+        voice: S.tts.voice, proxy: S.tts.proxy, provider: S.tts.provider,
+        model: S.tts.model, style: S.tts.style, clientSpeed: S.tts.clientSpeed,
+        speed: S.tts.speed, engine: S.tts.engine
+      };
+    }
     await saveSettings();
     audioCache.clear();
-    toast('设置已成功保存', 'ok');
+    applyPlaybackRate();
+    toast('已保存', 'ok');
     closeSet();
   };
 
@@ -1498,7 +1597,10 @@ function bind() {
       headers: $('#ttsHeaders').value,
       body: $('#ttsBody').value,
       proxy: $('#ttsProxy').value.trim(),
-      engine: 'http'
+      engine: 'http',
+      provider: S.tts.provider || '',
+      model: S.tts.model || '',
+      style: S.tts.provider === 'mimo' ? $('#mimoStyle').value.trim() : ''
     };
     const voice = $('#ttsVoice').value.trim();
     const box = $('#testResult');
@@ -1517,10 +1619,14 @@ function bind() {
         const resp = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: '你好，这是一次朗读测试。', voice, speed: +S.tts.speed, cache: false })
+          body: JSON.stringify({
+            text: '你好，这是一次朗读测试。', voice, speed: +S.tts.speed, cache: false,
+            provider: S.tts.provider || '', model: S.tts.model || '', style: S.tts.style || ''
+          })
         });
         if (resp.ok) {
           audioEl.src = URL.createObjectURL(await resp.blob());
+          applyPlaybackRate();
           audioEl.play();
         }
       } else {
@@ -1629,6 +1735,11 @@ function bind() {
   bind();
   await loadSettings();
   applyPageMode();
-  try { presets = (await api('/api/presets')).presets; } catch (e) {}
+  try {
+    const p = await api('/api/presets');
+    presets = p.presets || {};
+    mimoVoices = p.mimo_voices || [];
+    mimoReady = !!p.mimo_ready;
+  } catch (e) { }
   await loadShelf();
 })();

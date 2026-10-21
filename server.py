@@ -93,7 +93,11 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/books":
                 return self.send_json({"books": booklib.list_books()})
             if p == "/api/presets":
-                return self.send_json({"presets": tts.PRESETS})
+                return self.send_json({
+                    "presets": tts.PRESETS,
+                    "mimo_voices": tts.MIMO_VOICES,
+                    "mimo_ready": tts.mimo_ready(),
+                })
             if p == "/api/settings":
                 return self.send_json(booklib.get_settings())
             if p == "/api/sources/export":
@@ -203,6 +207,13 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.isdir(tts.CACHE_DIR):
                     shutil.rmtree(tts.CACHE_DIR)
                 return self.send_json({"ok": True})
+            if p == "/api/tts/key":
+                d = jbody(self)
+                try:
+                    tts.save_mimo_key(d.get("key") or "")
+                except tts.TTSError as e:
+                    return self.err(e.msg, 400)
+                return self.send_json({"ok": True, "ready": tts.mimo_ready()})
             parts = [x for x in p.split("/") if x]
             if len(parts) == 4 and parts[1] == "sources" and parts[3] == "toggle":
                 return self.send_json({"ok": True, "enabled": sources.toggle_source(parts[2])})
@@ -286,6 +297,14 @@ class Handler(BaseHTTPRequestHandler):
         saved = (booklib.get_settings() or {}).get("tts") or {}
         cfg.update({k: v for k, v in saved.items() if v not in (None, "")})
         cfg.update({k: v for k, v in (d.get("cfg") or {}).items() if v is not None})
+        # 显式指定 provider：用该服务商自己的配置（profiles 里存过就用存的，否则用预设）
+        prov = (d.get("provider") or "").strip()
+        if prov:
+            prof = (saved.get("profiles") or {}).get(prov) or {}
+            for k, v in {**(tts.PRESETS.get(prov) or {}), **prof}.items():
+                if k != "note" and v not in (None, ""):
+                    cfg[k] = v
+            cfg["provider"] = prov
         return cfg
 
     def api_tts(self):
@@ -294,6 +313,9 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             return self.err("没有文本")
         cfg = self._cfg_from_request(d)
+        for k in ("model", "style", "format"):
+            if d.get(k) not in (None, ""):
+                cfg[k] = d[k]
         if cfg.get("engine") == "web":
             return self.err("浏览器语音由前端处理，不该请求这里")
         try:

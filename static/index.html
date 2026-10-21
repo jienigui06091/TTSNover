@@ -560,6 +560,23 @@
         <input id="ttsVoice" class="modern-input" placeholder="例如 Fish Audio 音色链接 /model/ 后面的那一串字符串">
       </div>
 
+      <div id="mimoBox" class="hide">
+        <div class="row col">
+          <label>小米预置音色</label>
+          <select id="mimoVoiceSel" class="modern-select"></select>
+          <p class="hint">选中后会填进上面的「音色 ID」，也可以直接手填</p>
+        </div>
+        <div class="row col">
+          <label>风格指令（可留空）</label>
+          <input id="mimoStyle" class="modern-input" placeholder="自然、平稳的朗读语气，语速适中">
+        </div>
+        <div class="row col">
+          <label>小米 API Key</label>
+          <input id="mimoKeyInput" class="modern-input" type="password" autocomplete="off" placeholder="留空表示不修改">
+          <p class="hint" id="mimoKeyState"></p>
+        </div>
+      </div>
+
       <div class="row col">
         <label>网络代理 (本机访问境外接口)</label>
         <input id="ttsProxy" class="modern-input" placeholder="http://127.0.0.1:7890">
