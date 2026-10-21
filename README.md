@@ -50,7 +50,7 @@
 书架右上角 ⚙ 或阅读页右上角 `Aa` → **朗读** 标签页。
 
 1. **预设**：先选一家（Fish Audio / 小米 MiMo / 硅基流动 / OpenAI 兼容 / Azure / 浏览器语音），会自动填好 URL、请求头、请求体
-2. **音色 ID**：Fish Audio 就是音色页地址栏 `/model/` 后面那串，自己填；小米可以用上面的「预置音色」下拉，也能直接手填
+2. **音色 ID**：Fish Audio 就是音色页地址栏 `/model/` 后面那串，自己填；小米不用管这一栏（它有三种音色来源，见下）
 3. **测试发音**：直接告诉你结果——成功显示字节数/格式/耗时，失败显示 HTTP 状态码和接口原话
 4. **保存**
 
@@ -59,13 +59,16 @@
 | 项 | 值 |
 |---|---|
 | 接口 | `POST https://api.xiaomimimo.com/v1/chat/completions`（OpenAI 兼容，国内直连，不用代理） |
-| 模型 | `mimo-v2.5-tts` |
-| 鉴权 | `Authorization: Bearer <key>`，**由服务端注入**，前端拿不到 |
+| 模型 | 三种音色来源各一个模型：`mimo-v2.5-tts`（预置）、`mimo-v2.5-tts-voicedesign`（音色设计）、`mimo-v2.5-tts-voiceclone`（音色克隆） |
+| 鉴权 | `Authorization: Bearer <key>`，key 只在服务端，前端拿不到 |
 | Key 存放 | `data/mimo.key`（`chmod 600`，`data/` 已被 git 忽略），或环境变量 `MIMO_API_KEY`；也可在设置页粘贴后点保存写入 |
 | 预置音色 | `mimo_default`、冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo、Dean |
+| 音色设计 | 设置页选「音色设计」，用一两句话描述（性别年龄/音色质感/口音/语速情绪）当 `user` 消息，模型按描述现造音色；不传 `audio.voice`，`assistant` 仍是正文。合成速度接近预置（实测 ~2–5 秒/句） |
+| 音色克隆 | 设置页选「音色克隆」，上传 mp3/wav 样本（几秒到一分钟干净人声，≤7 MB），服务端存 `data/mimo_clones/` 并把样本转成 `data:audio/...;base64,...` 放进 `audio.voice`。**上游排队较飘（实测 3–170 秒/句）**，超时给到 240 秒，同句同样本第二次命中缓存秒回 |
 | 返回 | JSON 里 `choices[0].message.audio.data` 是 base64，取 `audio.format=mp3` 解码后直接播（64 kbps / 24 kHz，比 wav 小约 7 倍） |
-| 语速 | 接口没有语速参数 → 由前端 `playbackRate` 变速播放（`preservesPitch` 保持音调），**改语速不会重新合成**，缓存也按「模型+音色+风格+正文」算，不含语速 |
-| 风格指令 | 请求里的 `user` 消息是风格描述（如「自然、平稳的朗读语气」），`assistant` 消息才是正文；设置页「风格指令」可改 |
+| 语速 | 接口没有语速参数 → 由前端 `playbackRate` 变速播放（`preservesPitch` 保持音调），**改语速不会重新合成**，缓存按「模型+音色/描述/样本+风格+正文」算，不含语速 |
+| 风格指令 | 请求里的 `user` 消息是风格描述（如「自然、平稳的朗读语气」），`assistant` 消息才是正文；设置页「风格指令」可改（音色设计模式下会接在描述后面） |
+| 克隆样本管理 | `POST /api/tts/mimo/clone`（name + filename + base64 data）上传，`POST /api/tts/mimo/clone/delete` 删除，`GET /api/presets` 里的 `mimo_clones` 返回列表（只给名字/大小） |
 
 ### 请求体模板的占位符
 

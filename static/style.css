@@ -1573,6 +1573,44 @@ body[data-theme="green"] .setting-group {
   display: block;
 }
 
+/* 小米音色克隆：文件选择 + 上传/删除按钮 */
+.clone-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.clone-upload-row input[type="file"] {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--dim);
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--line);
+  background: rgba(0, 0, 0, 0.15);
+}
+.clone-upload-row input[type="file"]::file-selector-button {
+  margin-right: 8px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 8px;
+  background: var(--line);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.clone-upload-row .btn {
+  flex: 0 0 auto;
+}
+#mimoVoiceDesc {
+  resize: vertical;
+  min-height: 68px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+
 /* ---------- 搜书与详情页面 ---------- */
 .search-box-wrap {
   flex: 1;

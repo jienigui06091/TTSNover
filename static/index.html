@@ -555,17 +555,46 @@
         </div>
       </div>
 
-      <div class="row col">
+      <div class="row col" id="ttsVoiceRow">
         <label>音色 ID (Voice ID)</label>
         <input id="ttsVoice" class="modern-input" placeholder="例如 Fish Audio 音色链接 /model/ 后面的那一串字符串">
       </div>
 
       <div id="mimoBox" class="hide">
         <div class="row col">
+          <label>小米音色来源</label>
+          <select id="mimoMode" class="modern-select">
+            <option value="preset">预置音色 · 官方精品音色</option>
+            <option value="design">音色设计 · 用文字描述现造一个</option>
+            <option value="clone">音色克隆 · 上传人声样本复刻</option>
+          </select>
+          <p class="hint" id="mimoModeHint"></p>
+        </div>
+
+        <div class="row col" id="mimoPresetRow">
           <label>小米预置音色</label>
           <select id="mimoVoiceSel" class="modern-select"></select>
           <p class="hint">选中后会填进上面的「音色 ID」，也可以直接手填</p>
         </div>
+
+        <div class="row col hide" id="mimoDesignRow">
+          <label>音色描述（音色设计）</label>
+          <textarea id="mimoVoiceDesc" class="modern-input" rows="3"
+            placeholder="例：五十多岁的男性评书先生，北方口音，嗓音醇厚略带沙哑，语速舒缓、抑扬顿挫分明"></textarea>
+          <p class="hint">写清性别年龄、音色质感、口音、语速情绪；越具体越稳定</p>
+        </div>
+
+        <div class="row col hide" id="mimoCloneRow">
+          <label>克隆样本</label>
+          <select id="mimoCloneSel" class="modern-select"></select>
+          <div class="clone-upload-row">
+            <input id="mimoCloneFile" type="file" accept="audio/mpeg,audio/mp3,audio/wav,.mp3,.wav">
+            <button class="btn ghost sm" id="btnMimoCloneUp" type="button">上传</button>
+            <button class="btn ghost sm" id="btnMimoCloneDel" type="button">删除</button>
+          </div>
+          <p class="hint" id="mimoCloneHint">支持 mp3 / wav，建议 5–60 秒干净人声（样本存服务端 data/mimo_clones）；克隆合成比预置慢，单句常要几十秒</p>
+        </div>
+
         <div class="row col">
           <label>风格指令（可留空）</label>
           <input id="mimoStyle" class="modern-input" placeholder="自然、平稳的朗读语气，语速适中">

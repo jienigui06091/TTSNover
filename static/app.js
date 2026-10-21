@@ -27,6 +27,9 @@ const DEFAULTS = {
     model: '',
     style: '',
     clientSpeed: false,      // true = 语速由前端 playbackRate 控制，改速不重新合成
+    mimoMode: 'preset',      // 小米音色来源：preset 预置 | design 音色设计 | clone 音色克隆
+    mimoVoiceDesc: '',       // 音色设计：文字描述
+    mimoClone: '',           // 音色克隆：样本名（存服务端 data/mimo_clones）
     profiles: {}             // 每个服务商各存一份配置
   }
 };
@@ -38,6 +41,7 @@ let chunks = [];            // 已拼接进正文的章节块（连续阅读）
 let prefetched = new Map(); // idx -> 已提前取回的章节数据
 let appending = false, endMarked = false;
 let presets = {}, mimoVoices = [], mimoReady = false;
+let mimoModes = [], mimoClones = [], mimoDesignDefault = '', mimoCloneMax = 7 * 1024 * 1024;
 let saveTimer = null;
 let shelfBooksList = [];    // 书架本地缓存列表，用于即时搜索过滤
 let sourcesList = [];       // 书源列表缓存
@@ -790,7 +794,10 @@ async function getAudio(text) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       text, voice: S.tts.voice, speed: S.tts.speed,
-      provider: S.tts.provider || '', model: S.tts.model || '', style: S.tts.style || ''
+      provider: S.tts.provider || '', model: S.tts.model || '', style: S.tts.style || '',
+      mimoMode: S.tts.mimoMode || 'preset',
+      mimoVoiceDesc: S.tts.mimoVoiceDesc || '',
+      mimoClone: S.tts.mimoClone || ''
     })
   });
   if (!r.ok) {
@@ -974,11 +981,36 @@ function currentPresetKey() {
   return '';
 }
 
-/* 小米面板：预置音色下拉 + 风格 + Key 状态 */
+/* 小米面板：音色来源三选一（预置/设计/克隆）+ 风格 + Key 状态 */
 function fillMimoForm() {
   const on = S.tts.provider === 'mimo';
   $('#mimoBox').classList.toggle('hide', !on);
-  if (!on) return;
+  if (!on) {
+    // 非小米服务商：音色 ID 一定可见（别被小米克隆模式隐藏后带过去）
+    const vRow0 = $('#ttsVoiceRow');
+    if (vRow0) vRow0.classList.remove('hide');
+    return;
+  }
+
+  const mode = S.tts.mimoMode || 'preset';
+  const mSel = $('#mimoMode');
+  if (!mSel.dataset.filled && mimoModes.length) {
+    mSel.innerHTML = mimoModes.map((m) =>
+      `<option value="${escapeHtml(m.key)}">${escapeHtml(m.label)}</option>`).join('');
+    mSel.dataset.filled = '1';
+  }
+  mSel.value = mode;
+  const mInfo = mimoModes.find((m) => m.key === mode) || {};
+  $('#mimoModeHint').textContent = mInfo.hint
+    ? `${mInfo.hint}　（模型 ${mInfo.model || ''}）` : '';
+
+  $('#mimoPresetRow').classList.toggle('hide', mode !== 'preset');
+  $('#mimoDesignRow').classList.toggle('hide', mode !== 'design');
+  $('#mimoCloneRow').classList.toggle('hide', mode !== 'clone');
+  // 音色 ID 只对「预置音色」有意义：设计和克隆都不用它
+  const vRow = $('#ttsVoiceRow');
+  if (vRow) vRow.classList.toggle('hide', mode !== 'preset');
+
   const sel = $('#mimoVoiceSel');
   if (!sel.dataset.filled && mimoVoices.length) {
     sel.innerHTML = mimoVoices.map((v) => {
@@ -990,10 +1022,35 @@ function fillMimoForm() {
   const want = S.tts.voice || 'mimo_default';
   sel.value = want;
   if (!sel.value) sel.value = 'mimo_default';
+
+  const desc = $('#mimoVoiceDesc');
+  desc.value = S.tts.mimoVoiceDesc || '';
+  desc.placeholder = '例：' + (mimoDesignDefault || '五十多岁的男性评书先生，北方口音，嗓音醇厚略带沙哑');
+
+  fillCloneList();
   $('#mimoStyle').value = S.tts.style || '';
   $('#mimoKeyState').textContent = mimoReady
     ? '✓ 服务端已配置 Key（存 data/mimo.key，前端拿不到、不进 Git）'
     : '⚠ 服务端还没有 Key：粘贴到上面输入框，点「保存」写入';
+}
+
+/* 克隆样本下拉：只有名字 + 大小，音频本身留在服务端 */
+function fillCloneList() {
+  const sel = $('#mimoCloneSel');
+  if (!sel) return;
+  if (!mimoClones.length) {
+    sel.innerHTML = '<option value="">（还没有样本，先上传一段 mp3/wav）</option>';
+    sel.value = '';
+    return;
+  }
+  sel.innerHTML = mimoClones.map((c) =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}（${fmtBytes(c.bytes)}）</option>`).join('');
+  const want = S.tts.mimoClone || '';
+  sel.value = want;
+  if (!sel.value) {
+    sel.value = mimoClones[0].name;
+    S.tts.mimoClone = sel.value;
+  }
 }
 
 function applyPreset(key) {
@@ -1012,6 +1069,9 @@ function applyPreset(key) {
   S.tts.style = src.style || '';
   S.tts.clientSpeed = !!src.clientSpeed;
   S.tts.voice = src.voice || '';
+  S.tts.mimoMode = src.mimoMode || 'preset';
+  S.tts.mimoVoiceDesc = src.mimoVoiceDesc || '';
+  S.tts.mimoClone = src.mimoClone || '';
   if (saved) {
     if (saved.speed) S.tts.speed = saved.speed;
   } else if (p.speed && !p.keepSpeed) {
@@ -1510,6 +1570,73 @@ function bind() {
   $('#ttsPreset').onchange = (e) => applyPreset(e.target.value);
   // 选小米预置音色 → 填进「音色 ID」，手填仍可覆盖
   $('#mimoVoiceSel').onchange = (e) => { $('#ttsVoice').value = e.target.value; };
+
+  // 小米音色来源：预置 / 音色设计 / 音色克隆
+  $('#mimoMode').onchange = (e) => {
+    S.tts.mimoMode = e.target.value || 'preset';
+    fillMimoForm();
+    saveSettings();
+  };
+  $('#mimoVoiceDesc').oninput = (e) => { S.tts.mimoVoiceDesc = e.target.value.trim(); };
+  $('#mimoCloneSel').onchange = (e) => {
+    S.tts.mimoClone = e.target.value || '';
+    saveSettings();
+  };
+  // 上传克隆样本：走服务端中转，音频存 data/mimo_clones，前端只拿名字
+  $('#btnMimoCloneUp').onclick = async () => {
+    const f = $('#mimoCloneFile').files[0];
+    if (!f) return toast('先选一个 mp3/wav 文件', 'err', 3000);
+    if (f.size > mimoCloneMax) {
+      return toast(`样本太大（${fmtBytes(f.size)}），上限 ${fmtBytes(mimoCloneMax)}`, 'err', 4000);
+    }
+    const name = (prompt('给这段样本起个名字（用来在音色克隆里选）', f.name.replace(/\.[^.]+$/, '')) || '').trim();
+    if (!name) return;
+    const btn = $('#btnMimoCloneUp');
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = '上传中…';
+    try {
+      const data = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(String(fr.result).split(',')[1] || '');
+        fr.onerror = () => rej(new Error('读取文件失败'));
+        fr.readAsDataURL(f);
+      });
+      const r = await api('/api/tts/mimo/clone', {
+        method: 'POST',
+        body: JSON.stringify({ name, filename: f.name, data })
+      });
+      mimoClones = r.clones || [];
+      S.tts.mimoClone = name;
+      S.tts.mimoMode = 'clone';
+      fillMimoForm();
+      await saveSettings();
+      toast(`样本「${name}」已存到服务端`, 'ok');
+    } catch (e) {
+      toast('上传失败：' + e.message, 'err', 4000);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+      $('#mimoCloneFile').value = '';
+    }
+  };
+  $('#btnMimoCloneDel').onclick = async () => {
+    const name = $('#mimoCloneSel').value;
+    if (!name) return toast('没有可删的样本', 'err', 3000);
+    if (!confirm(`删除克隆样本「${name}」？`)) return;
+    try {
+      const r = await api('/api/tts/mimo/clone/delete', {
+        method: 'POST', body: JSON.stringify({ name })
+      });
+      mimoClones = r.clones || [];
+      if (S.tts.mimoClone === name) S.tts.mimoClone = mimoClones[0] ? mimoClones[0].name : '';
+      fillMimoForm();
+      await saveSettings();
+      toast('已删除', 'ok');
+    } catch (e) {
+      toast('删除失败：' + e.message, 'err', 4000);
+    }
+  };
   $('#btnTtsCfg').onclick = () => { setTtsPanel(false); openSet('tts'); };
 
   // 排版步进器
@@ -1560,6 +1687,15 @@ function bind() {
     S.tts.proxy = $('#ttsProxy').value.trim();
     if (S.tts.provider === 'mimo') {
       S.tts.style = $('#mimoStyle').value.trim();
+      S.tts.mimoMode = $('#mimoMode').value || 'preset';
+      S.tts.mimoVoiceDesc = $('#mimoVoiceDesc').value.trim();
+      S.tts.mimoClone = $('#mimoCloneSel').value || '';
+      if (S.tts.mimoMode === 'clone' && !S.tts.mimoClone) {
+        return toast('音色克隆要先上传一段样本', 'err', 3500);
+      }
+      if (S.tts.mimoMode === 'design' && !S.tts.mimoVoiceDesc) {
+        return toast('音色设计要写一句音色描述', 'err', 3500);
+      }
       const k = $('#mimoKeyInput').value.trim();
       if (k) {
         try {
@@ -1580,6 +1716,7 @@ function bind() {
         url: S.tts.url, method: S.tts.method, headers: S.tts.headers, body: S.tts.body,
         voice: S.tts.voice, proxy: S.tts.proxy, provider: S.tts.provider,
         model: S.tts.model, style: S.tts.style, clientSpeed: S.tts.clientSpeed,
+        mimoMode: S.tts.mimoMode, mimoVoiceDesc: S.tts.mimoVoiceDesc, mimoClone: S.tts.mimoClone,
         speed: S.tts.speed, engine: S.tts.engine
       };
     }
@@ -1591,6 +1728,7 @@ function bind() {
   };
 
   $('#btnTestTts').onclick = async () => {
+    const isMimo = S.tts.provider === 'mimo';
     const cfg = {
       url: $('#ttsUrl').value.trim(),
       method: $('#ttsMethod').value,
@@ -1600,7 +1738,10 @@ function bind() {
       engine: 'http',
       provider: S.tts.provider || '',
       model: S.tts.model || '',
-      style: S.tts.provider === 'mimo' ? $('#mimoStyle').value.trim() : ''
+      style: isMimo ? $('#mimoStyle').value.trim() : '',
+      mimoMode: isMimo ? ($('#mimoMode').value || 'preset') : '',
+      mimoVoiceDesc: isMimo ? $('#mimoVoiceDesc').value.trim() : '',
+      mimoClone: isMimo ? ($('#mimoCloneSel').value || '') : ''
     };
     const voice = $('#ttsVoice').value.trim();
     const box = $('#testResult');
@@ -1621,7 +1762,8 @@ function bind() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             text: '你好，这是一次朗读测试。', voice, speed: +S.tts.speed, cache: false,
-            provider: S.tts.provider || '', model: S.tts.model || '', style: S.tts.style || ''
+            provider: S.tts.provider || '', model: S.tts.model || '', style: S.tts.style || '',
+            mimoMode: cfg.mimoMode, mimoVoiceDesc: cfg.mimoVoiceDesc, mimoClone: cfg.mimoClone
           })
         });
         if (resp.ok) {
@@ -1740,6 +1882,10 @@ function bind() {
     presets = p.presets || {};
     mimoVoices = p.mimo_voices || [];
     mimoReady = !!p.mimo_ready;
+    mimoModes = p.mimo_modes || [];
+    mimoClones = p.mimo_clones || [];
+    mimoDesignDefault = p.mimo_design_default || '';
+    if (p.mimo_clone_max) mimoCloneMax = p.mimo_clone_max;
   } catch (e) { }
   await loadShelf();
 })();

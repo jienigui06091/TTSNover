@@ -4,6 +4,7 @@
 
 启动：python3 server.py [端口]
 """
+import base64
 import json
 import mimetypes
 import os
@@ -97,6 +98,10 @@ class Handler(BaseHTTPRequestHandler):
                     "presets": tts.PRESETS,
                     "mimo_voices": tts.MIMO_VOICES,
                     "mimo_ready": tts.mimo_ready(),
+                    "mimo_modes": tts.MIMO_MODES,
+                    "mimo_clones": tts.clone_voices(),
+                    "mimo_design_default": tts.MIMO_DESIGN_DEFAULT,
+                    "mimo_clone_max": tts.MIMO_CLONE_MAX,
                 })
             if p == "/api/settings":
                 return self.send_json(booklib.get_settings())
@@ -214,6 +219,25 @@ class Handler(BaseHTTPRequestHandler):
                 except tts.TTSError as e:
                     return self.err(e.msg, 400)
                 return self.send_json({"ok": True, "ready": tts.mimo_ready()})
+            if p == "/api/tts/mimo/clone":
+                # 上传克隆样本：{name, filename, data(base64)}，样本落在 data/mimo_clones
+                d = jbody(self)
+                try:
+                    raw = base64.b64decode((d.get("data") or "").split(",")[-1])
+                except Exception:
+                    return self.err("样本 base64 解不开", 400)
+                try:
+                    ent = tts.save_clone_voice(d.get("name") or "", raw, d.get("filename") or "")
+                except tts.TTSError as e:
+                    return self.err(e.msg, 400)
+                return self.send_json({"ok": True, "saved": ent, "clones": tts.clone_voices()})
+            if p == "/api/tts/mimo/clone/delete":
+                d = jbody(self)
+                try:
+                    tts.delete_clone_voice(d.get("name") or "")
+                except tts.TTSError as e:
+                    return self.err(e.msg, 400)
+                return self.send_json({"ok": True, "clones": tts.clone_voices()})
             parts = [x for x in p.split("/") if x]
             if len(parts) == 4 and parts[1] == "sources" and parts[3] == "toggle":
                 return self.send_json({"ok": True, "enabled": sources.toggle_source(parts[2])})
@@ -313,7 +337,7 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             return self.err("没有文本")
         cfg = self._cfg_from_request(d)
-        for k in ("model", "style", "format"):
+        for k in ("model", "style", "format", "mimoMode", "mimoVoiceDesc", "mimoClone"):
             if d.get(k) not in (None, ""):
                 cfg[k] = d[k]
         if cfg.get("engine") == "web":
@@ -337,6 +361,9 @@ class Handler(BaseHTTPRequestHandler):
     def api_tts_test(self):
         d = jbody(self)
         cfg = self._cfg_from_request(d)
+        for k in ("model", "style", "format", "mimoMode", "mimoVoiceDesc", "mimoClone"):
+            if d.get(k) not in (None, ""):
+                cfg[k] = d[k]
         text = (d.get("text") or "你好，这是一次朗读测试。").strip()
         out = {"ok": False}
         import time

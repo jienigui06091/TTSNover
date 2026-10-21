@@ -28,6 +28,27 @@ MIMO_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data",
 MIMO_STYLE = "自然、平稳的朗读语气，语速适中，适合长篇小说朗读"
 MIMO_FORMATS = {"mp3": "audio/mpeg", "wav": "audio/wav"}
 
+# 三种模型：预置音色 / 音色设计（文字描述生成音色）/ 音色克隆（音频样本复刻）
+MIMO_MODELS = {
+    "preset": "mimo-v2.5-tts",
+    "design": "mimo-v2.5-tts-voicedesign",
+    "clone": "mimo-v2.5-tts-voiceclone",
+}
+MIMO_MODES = [
+    {"key": "preset", "label": "预置音色", "model": MIMO_MODELS["preset"],
+     "hint": "官方精品音色列表，开箱可用"},
+    {"key": "design", "label": "音色设计", "model": MIMO_MODELS["design"],
+     "hint": "用一两句话描述想要的音色，模型现造一个；合成速度接近预置"},
+    {"key": "clone", "label": "音色克隆", "model": MIMO_MODELS["clone"],
+     "hint": "上传一段干净人声样本复刻音色；上游较慢，单句常要几十秒，已开缓存"},
+]
+MIMO_DESIGN_DEFAULT = ("五十多岁的男性评书先生，北方口音，嗓音醇厚略带沙哑，"
+                       "语速舒缓、抑扬顿挫分明，像在茶馆里讲长篇故事。")
+# 克隆样本：mp3/wav，base64 后要 <10MB（原文约 ≤7MB）
+MIMO_CLONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mimo_clones")
+MIMO_CLONE_MAX = 7 * 1024 * 1024
+MIMO_CLONE_MIME = {"mp3": "audio/mpeg", "wav": "audio/wav"}
+
 # 官方预置音色（文档「预置音色列表」）
 MIMO_VOICES = [
     {"id": "mimo_default", "name": "MiMo 默认", "lang": "中/英", "gender": ""},
@@ -77,6 +98,139 @@ def is_mimo(cfg):
     if prov:
         return prov in ("mimo", "xiaomi", "xiaomi-mimo", "mimo-tts")
     return "xiaomimimo.com" in str(cfg.get("url") or "")
+
+
+# ---------------- 克隆样本库（data/mimo_clones，gitignore 覆盖） ----------------
+
+def _clone_index_path():
+    return os.path.join(MIMO_CLONE_DIR, "index.json")
+
+
+def _clone_index():
+    try:
+        with open(_clone_index_path(), "r", encoding="utf-8") as f:
+            j = json.load(f)
+        return j if isinstance(j, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _clone_write_index(items):
+    os.makedirs(MIMO_CLONE_DIR, exist_ok=True)
+    p = _clone_index_path()
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+
+
+def clone_voices():
+    """已保存的克隆样本（只回名字/大小，路径不出服务端）。顺手清掉文件已丢的脏条目。"""
+    out, items, dirty = [], _clone_index(), False
+    for it in items:
+        f = os.path.join(MIMO_CLONE_DIR, str(it.get("file") or ""))
+        if os.path.isfile(f):
+            out.append({"name": it.get("name") or "", "file": it.get("file"),
+                        "bytes": os.path.getsize(f), "ext": it.get("ext") or "mp3",
+                        "added": it.get("added") or 0})
+        else:
+            dirty = True
+    if dirty:
+        try:
+            _clone_write_index([i for i in items
+                                if os.path.isfile(os.path.join(MIMO_CLONE_DIR, str(i.get("file") or "")))])
+        except OSError:
+            pass
+    out.sort(key=lambda x: x.get("added") or 0)
+    return out
+
+
+def save_clone_voice(name, data, filename=""):
+    """存一段样本（mp3/wav）。同名覆盖，旧文件顺手删掉。"""
+    name = (name or "").strip() or "未命名样本"
+    ext = os.path.splitext(filename or "")[1].lower().lstrip(".")
+    if ext not in MIMO_CLONE_MIME:
+        ext = "wav" if data[:4] == b"RIFF" else "mp3"
+    if not data:
+        raise TTSError("样本是空的")
+    if len(data) < 4000:
+        raise TTSError("样本太小（%d 字节），至少给几秒干净人声" % len(data))
+    if len(data) > MIMO_CLONE_MAX:
+        raise TTSError("样本太大（%.1f MB），base64 后要 <10MB，请压到 %.0f MB 以内"
+                       % (len(data) / 1048576.0, MIMO_CLONE_MAX / 1048576.0))
+    os.makedirs(MIMO_CLONE_DIR, exist_ok=True)
+    # 文件名带名字哈希：两个人起不同名字但传同一段音频，也不会互相删掉
+    fn = hashlib.sha256((name + "\0").encode("utf-8") + data).hexdigest()[:16] + "." + ext
+    with open(os.path.join(MIMO_CLONE_DIR, fn), "wb") as f:
+        f.write(data)
+    items = _clone_index()
+    for old in [i for i in items if i.get("name") == name]:
+        if old.get("file") and old["file"] != fn:
+            _drop_file_if_unused(old["file"], items, skip_name=name)
+    items = [i for i in items if i.get("name") != name]
+    items.append({"name": name, "file": fn, "ext": ext, "added": int(time.time())})
+    _clone_write_index(items)
+    return {"name": name, "file": fn, "bytes": len(data), "ext": ext}
+
+
+def _drop_file_if_unused(fn, items, skip_name=None):
+    """还有别的样本条目引用同一个文件时不能删（同名不同内容/同内容不同名都可能撞）。"""
+    for i in items:
+        if i.get("file") == fn and i.get("name") != skip_name:
+            return False
+    try:
+        os.remove(os.path.join(MIMO_CLONE_DIR, str(fn)))
+    except OSError:
+        pass
+    return True
+
+
+def delete_clone_voice(name):
+    items = _clone_index()
+    keep, gone = [], None
+    for i in items:
+        if i.get("name") == name:
+            gone = i
+        else:
+            keep.append(i)
+    if not gone:
+        raise TTSError("没有这个克隆样本：%s" % name)
+    _drop_file_if_unused(gone.get("file") or "", items, skip_name=name)
+    _clone_write_index(keep)
+    return True
+
+
+def _clone_data_uri(name):
+    """返回 (data:audio/...;base64,..., 指纹)。指纹进缓存 key，换样本自动失效。"""
+    name = (name or "").strip()
+    if not name:
+        raise TTSError("音色克隆模式要先选一个样本（或上传一段 mp3/wav）")
+    for it in _clone_index():
+        if it.get("name") != name:
+            continue
+        p = os.path.join(MIMO_CLONE_DIR, str(it.get("file") or ""))
+        if not os.path.isfile(p):
+            break
+        data = open(p, "rb").read()
+        if not data:
+            break
+        ext = str(it.get("ext") or "mp3").lower()
+        mime = MIMO_CLONE_MIME.get(ext, "audio/mpeg")
+        fp = hashlib.sha256(data).hexdigest()[:16]
+        return "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii")), fp
+    raise TTSError("找不到克隆样本「%s」，请重新上传" % name)
+
+
+def mimo_mode(cfg):
+    """preset / design / clone。显式 mimoMode 优先；老配置只有 model 时按 model 认。"""
+    mode = str(cfg.get("mimoMode") or cfg.get("mimo_mode") or "").strip().lower()
+    if mode in MIMO_MODELS:
+        return mode
+    model = str(cfg.get("model") or "").strip().lower()
+    for k, m in MIMO_MODELS.items():
+        if model == m:
+            return k
+    return "preset"
 
 
 class TTSError(Exception):
@@ -249,8 +403,8 @@ def synthesize(cfg, text, voice=None, speed=None, use_cache=True):
 
 # ---------------- 小米 MiMo TTS 实现 ----------------
 
-def mimo_cache_key(model, voice, style, text):
-    raw = json.dumps(["mimo", model, voice, style, text], ensure_ascii=False, sort_keys=True)
+def mimo_cache_key(mode, model, voice_key, style, text):
+    raw = json.dumps(["mimo", mode, model, voice_key, style, text], ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -274,16 +428,18 @@ def _mimo_err(body):
 def synthesize_mimo(cfg, text, voice=None, use_cache=True):
     """小米 MiMo TTS：POST /v1/chat/completions，音频在 JSON 的 base64 里。
 
-    - user 消息 = 风格指令（语气/情绪），assistant 消息 = 要念的正文
-    - audio.format 默认 mp3（约 64kbps，比 wav 小 7 倍，浏览器直接能播）
-    - 语速不走上游参数：前端用 playbackRate 播放，改语速不必重新合成
+    三种模型（文档「语音合成 MiMo-V2.5-TTS 系列」）：
+    - preset：mimo-v2.5-tts              → audio.voice = 预置音色名
+    - design：mimo-v2.5-tts-voicedesign  → user 消息 = 音色描述，不带 voice
+    - clone ：mimo-v2.5-tts-voiceclone   → audio.voice = data:audio/...;base64,<样本>
+    assistant 消息永远是正文；语速不走上游参数，前端 playbackRate 变速。
     """
     key_api = mimo_key()
     if not key_api:
         raise TTSError("小米 API Key 未配置：把 key 写进 data/mimo.key，或设环境变量 MIMO_API_KEY")
 
-    model = str(cfg.get("model") or MIMO_MODEL).strip()
-    voice = str(voice or cfg.get("voice") or "冰糖").strip()
+    mode = mimo_mode(cfg)
+    model = MIMO_MODELS[mode]
     style = clean_text(cfg.get("style") or "") or MIMO_STYLE
     fmt = str(cfg.get("format") or "mp3").strip().lower()
     if fmt not in MIMO_FORMATS:
@@ -292,7 +448,28 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
     if "xiaomimimo.com" not in url:
         url = MIMO_URL
 
-    ck = mimo_cache_key(model, voice, style, text)
+    # 每种模式下"音色"的等价物，进缓存 key，避免串音
+    if mode == "preset":
+        voice = str(voice or cfg.get("voice") or "冰糖").strip()
+        voice_key = voice
+        user_msg = style
+        audio = {"format": fmt, "voice": voice}
+    elif mode == "design":
+        desc = str(cfg.get("mimoVoiceDesc") or cfg.get("mimo_desc") or "").strip() or MIMO_DESIGN_DEFAULT
+        voice = ""
+        voice_key = desc
+        # 音色描述写在 user 里；用户另外改过风格指令时接在后面（同一段话术）
+        user_msg = desc if style == MIMO_STYLE else (desc + "\n" + style)
+        audio = {"format": fmt}
+    else:
+        clone_name = str(cfg.get("mimoClone") or cfg.get("mimo_clone") or "").strip()
+        uri, fp = _clone_data_uri(clone_name)
+        voice = clone_name
+        voice_key = "%s#%s" % (clone_name, fp)
+        user_msg = style
+        audio = {"format": fmt, "voice": uri}
+
+    ck = mimo_cache_key(mode, model, voice_key, style, text)
     if use_cache:
         hit = cached(ck)
         if hit:
@@ -301,10 +478,10 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
     payload = {
         "model": model,
         "messages": [
-            {"role": "user", "content": style},
+            {"role": "user", "content": user_msg},
             {"role": "assistant", "content": text},
         ],
-        "audio": {"format": fmt, "voice": voice},
+        "audio": audio,
     }
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key_api}
@@ -318,8 +495,10 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
     opener = urllib.request.build_opener(*handlers)
 
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    # 克隆模式上游排队很飘（实测 3s ~ 170s），给足超时，别把正常请求判成失败
+    default_timeout = 240 if mode == "clone" else 120
     try:
-        with opener.open(req, timeout=float(cfg.get("timeout") or 120)) as r:
+        with opener.open(req, timeout=float(cfg.get("timeout") or default_timeout)) as r:
             raw = r.read()
     except urllib.error.HTTPError as e:
         body = e.read()[:800].decode("utf-8", "replace")
@@ -357,7 +536,7 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
 # 预设：{{text}} 会自动做 JSON 转义，{{voice}} 独立可改
 PRESETS = {
     "mimo": {
-        "name": "小米 MiMo TTS（预置音色）",
+        "name": "小米 MiMo TTS（预置/设计/克隆）",
         "provider": "mimo",
         "url": MIMO_URL,
         "method": "POST",
@@ -366,11 +545,15 @@ PRESETS = {
         "body": "",
         "voice": "冰糖",
         "style": MIMO_STYLE,
+        "mimoMode": "preset",
+        "mimoVoiceDesc": "",
+        "mimoClone": "",
         "speed": 1.0,
         "keepSpeed": True,
         "clientSpeed": True,
         "proxy": "",
-        "note": "国内直连不用代理。音色：冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean。"
+        "note": "国内直连不用代理。三种音色来源：预置音色（冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean）、"
+                "音色设计（文字描述现造音色）、音色克隆（上传 mp3/wav 样本复刻）。"
                 "语速用浏览器变速播放（改速度不重新合成）。Key 存服务端 data/mimo.key。",
     },
     "fish": {
