@@ -2,193 +2,604 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
-<meta name="theme-color" content="#0f1218">
-<title>阅读 · 网页版</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>TTSNover · 极简美学阅读器</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-theme="dark" data-font="system">
 
-<!-- ============ 书架 ============ -->
+<!-- SVG 图标库 -->
+<svg style="display:none" aria-hidden="true">
+  <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+  </symbol>
+  <symbol id="icon-source" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+    <polyline points="2 17 12 22 22 17"></polyline>
+    <polyline points="2 12 12 17 22 12"></polyline>
+  </symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>
+  </symbol>
+  <symbol id="icon-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="3"></circle>
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+  </symbol>
+  <symbol id="icon-chevron-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="15 18 9 12 15 6"></polyline>
+  </symbol>
+  <symbol id="icon-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="9 18 15 12 9 6"></polyline>
+  </symbol>
+  <symbol id="icon-book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+  </symbol>
+  <symbol id="icon-toc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="8" y1="6" x2="21" y2="6"></line>
+    <line x1="8" y1="12" x2="21" y2="12"></line>
+    <line x1="8" y1="18" x2="21" y2="18"></line>
+    <line x1="3" y1="6" x2="3.01" y2="6"></line>
+    <line x1="3" y1="12" x2="3.01" y2="12"></line>
+    <line x1="3" y1="18" x2="3.01" y2="18"></line>
+  </symbol>
+  <symbol id="icon-font" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="4 7 4 4 20 4 20 7"></polyline>
+    <line x1="9" y1="20" x2="15" y2="20"></line>
+    <line x1="12" y1="4" x2="12" y2="20"></line>
+  </symbol>
+  <symbol id="icon-play" viewBox="0 0 24 24" fill="currentColor">
+    <polygon points="6 3 20 12 6 21 6 3"></polygon>
+  </symbol>
+  <symbol id="icon-pause" viewBox="0 0 24 24" fill="currentColor">
+    <rect x="6" y="4" width="4" height="16" rx="1"></rect>
+    <rect x="14" y="4" width="4" height="16" rx="1"></rect>
+  </symbol>
+  <symbol id="icon-prev-step" viewBox="0 0 24 24" fill="currentColor">
+    <polygon points="19 20 9 12 19 4 19 20"></polygon>
+    <line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="3" stroke-linecap="round"></line>
+  </symbol>
+  <symbol id="icon-next-step" viewBox="0 0 24 24" fill="currentColor">
+    <polygon points="5 4 15 12 5 20 5 4"></polygon>
+    <line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="3" stroke-linecap="round"></line>
+  </symbol>
+  <symbol id="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+  </symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="3 6 5 6 21 6"></polyline>
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+  </symbol>
+  <symbol id="icon-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+    <polyline points="17 8 12 3 7 8"></polyline>
+    <line x1="12" y1="3" x2="12" y2="15"></line>
+  </symbol>
+  <symbol id="icon-export" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+    <polyline points="7 10 12 15 17 10"></polyline>
+    <line x1="12" y1="15" x2="12" y2="3"></line>
+  </symbol>
+  <symbol id="icon-headphone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 18v-6a9 9 0 0 1 18 0v6"></path>
+    <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"></path>
+  </symbol>
+  <symbol id="icon-sparkle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2l2.4 7.2L21.6 12l-7.2 2.4L12 21.6l-2.4-7.2L2.4 12l7.2-2.4z"></path>
+  </symbol>
+</svg>
+
+<!-- ============ 书架视图 ============ -->
 <div id="shelf" class="view">
-  <header class="bar">
-    <h1>书架</h1>
+  <header class="bar glass">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg class="svg-icon"><use href="#icon-book"></use></svg>
+      </div>
+      <div class="brand-text">
+        <h1 class="brand-title">TTSNover</h1>
+        <span class="brand-badge">悦读</span>
+      </div>
+    </div>
+    
+    <div class="bar-search-wrap">
+      <svg class="svg-icon bar-search-icon"><use href="#icon-search"></use></svg>
+      <input type="text" id="shelfFilter" class="shelf-filter" placeholder="搜索书架书籍…" autocomplete="off">
+    </div>
+
     <div class="bar-actions">
-      <button id="btnDiscover" class="btn ghost" title="搜索网络小说">🔍</button>
-      <button id="btnSources" class="btn ghost" title="书源管理">源</button>
-      <button id="btnImport" class="btn primary">＋ 导入</button>
-      <button id="btnShelfSet" class="btn ghost" title="设置">⚙</button>
+      <button id="btnDiscover" class="btn btn-icon ghost" title="全网书源搜书">
+        <svg class="svg-icon"><use href="#icon-search"></use></svg>
+        <span class="btn-text">搜书</span>
+      </button>
+      <button id="btnSources" class="btn btn-icon ghost" title="书源管理">
+        <svg class="svg-icon"><use href="#icon-source"></use></svg>
+        <span class="btn-text">书源</span>
+      </button>
+      <button id="btnImport" class="btn primary btn-icon" title="上传 TXT 或 EPUB 文件">
+        <svg class="svg-icon"><use href="#icon-upload"></use></svg>
+        <span class="btn-text">导入书籍</span>
+      </button>
+      <button id="btnShelfSet" class="btn btn-icon ghost" title="阅读与朗读偏好设置">
+        <svg class="svg-icon"><use href="#icon-settings"></use></svg>
+      </button>
     </div>
   </header>
+
   <input type="file" id="fileInput" accept=".txt,.epub,text/plain,application/epub+zip" multiple hidden>
-  <div id="grid" class="grid"></div>
-  <p id="shelfEmpty" class="empty">书架是空的。<br>点右上角「导入」上传 TXT 或 EPUB。</p>
+
+  <main class="shelf-main" id="shelfMain">
+    <div id="grid" class="grid"></div>
+    
+    <div id="shelfEmpty" class="shelf-empty hide">
+      <div class="empty-dropzone" id="emptyDropzone">
+        <div class="empty-icon-wrap">
+          <svg class="svg-icon empty-icon"><use href="#icon-upload"></use></svg>
+        </div>
+        <h3 class="empty-title">书架空空如也</h3>
+        <p class="empty-desc">拖拽 TXT / EPUB 文件到此处，或点击下方按钮导入开始阅读</p>
+        <div class="empty-actions">
+          <button class="btn primary" id="btnEmptyImport">
+            <svg class="svg-icon"><use href="#icon-plus"></use></svg>
+            <span>选择本地文件</span>
+          </button>
+          <button class="btn ghost" id="btnEmptyDiscover">
+            <svg class="svg-icon"><use href="#icon-search"></use></svg>
+            <span>搜索网络小说</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
 </div>
 
-<!-- ============ 搜索（书源） ============ -->
+<!-- ============ 搜索（书源并发搜书） ============ -->
 <div id="discover" class="view hide">
-  <header class="bar">
-    <button class="btn ghost" id="btnDiscBack">‹</button>
-    <input id="searchInput" class="search-input" placeholder="书名 / 作者，回车搜索" autocomplete="off">
-    <button class="btn primary" id="btnDoSearch">搜索</button>
+  <header class="bar glass">
+    <button class="btn btn-icon ghost" id="btnDiscBack" title="返回书架">
+      <svg class="svg-icon"><use href="#icon-chevron-left"></use></svg>
+    </button>
+    <div class="search-box-wrap">
+      <svg class="svg-icon search-input-icon"><use href="#icon-search"></use></svg>
+      <input id="searchInput" class="search-input" placeholder="输入书名 / 作者，回车搜索全网书源…" autocomplete="off">
+      <button class="search-clear-btn hide" id="btnSearchClear" title="清空输入">✕</button>
+    </div>
+    <button class="btn primary" id="btnDoSearch">
+      <svg class="svg-icon"><use href="#icon-search"></use></svg>
+      <span>搜索</span>
+    </button>
   </header>
-  <div id="searchStat" class="hint pad"></div>
+  
+  <div id="searchStat" class="hint pad status-pill"></div>
   <div id="searchRes" class="res-list"></div>
 </div>
 
 <!-- ============ 书籍详情 ============ -->
 <div id="detail" class="view hide">
-  <header class="bar">
-    <button class="btn ghost" id="btnDetailBack">‹</button>
+  <header class="bar glass">
+    <button class="btn btn-icon ghost" id="btnDetailBack" title="返回搜索">
+      <svg class="svg-icon"><use href="#icon-chevron-left"></use></svg>
+    </button>
     <div class="title" id="detailTitle">书籍详情</div>
+    <div class="bar-actions-placeholder"></div>
   </header>
   <div id="detailBody" class="detail-body"></div>
 </div>
 
 <!-- ============ 书源管理 ============ -->
 <div id="srcmgr" class="view hide">
-  <header class="bar">
-    <button class="btn ghost" id="btnSrcBack">‹</button>
-    <div class="title">书源</div>
-    <button class="btn primary" id="btnSrcImport">导入</button>
+  <header class="bar glass">
+    <button class="btn btn-icon ghost" id="btnSrcBack" title="返回书架">
+      <svg class="svg-icon"><use href="#icon-chevron-left"></use></svg>
+    </button>
+    <div class="title">书源管理</div>
+    <button class="btn primary btn-icon" id="btnSrcImport" title="导入 Legado 书源 JSON">
+      <svg class="svg-icon"><use href="#icon-plus"></use></svg>
+      <span>导入书源</span>
+    </button>
   </header>
+  
   <input type="file" id="srcFile" accept=".json,application/json" hidden>
-  <div class="src-bar">
-    <span id="srcStat" class="hint"></span>
-    <button class="btn ghost sm" id="btnSrcExportOn" title="导出启用中的书源，可直接导入「阅读」App">导出启用</button>
-    <button class="btn ghost sm" id="btnSrcExportAll" title="导出全部书源（含已停用的）">导出全部</button>
+  
+  <div class="src-toolbar glass">
+    <div class="src-filter-wrap">
+      <svg class="svg-icon"><use href="#icon-search"></use></svg>
+      <input id="srcFilter" class="src-filter-input" placeholder="按书源名称 / 域名过滤…">
+    </div>
+    <div class="src-stat-group">
+      <span id="srcStat" class="hint"></span>
+    </div>
+    <div class="src-actions-group">
+      <button class="btn ghost sm" id="btnSrcToggleAll" title="一键开启或停用所有源">全选/反选</button>
+      <button class="btn ghost sm" id="btnSrcExportOn" title="导出启用中的书源">
+        <svg class="svg-icon"><use href="#icon-export"></use></svg>
+        <span>导出启用</span>
+      </button>
+      <button class="btn ghost sm" id="btnSrcExportAll" title="导出全部书源">导出全部</button>
+    </div>
   </div>
+  
   <div id="srcList" class="src-list"></div>
 </div>
 
 <!-- ============ 阅读器 ============ -->
 <div id="reader" class="view hide">
-  <header class="bar top" id="topBar">
-    <button class="btn ghost" id="btnBack">‹</button>
-    <div class="title" id="bookTitle"></div>
-    <button class="btn ghost" id="btnToc">目录</button>
-    <button class="btn ghost" id="btnReaderSet">Aa</button>
+  <header class="bar top glass" id="topBar">
+    <button class="btn btn-icon ghost" id="btnBack" title="返回书架">
+      <svg class="svg-icon"><use href="#icon-chevron-left"></use></svg>
+      <span class="btn-text">书架</span>
+    </button>
+    <div class="reader-titles">
+      <div class="title" id="bookTitle"></div>
+      <div class="sub-title" id="chapterSubTitle"></div>
+    </div>
+    <div class="bar-actions">
+      <button class="btn btn-icon ghost" id="btnToc" title="查看目录 (快捷键 M)">
+        <svg class="svg-icon"><use href="#icon-toc"></use></svg>
+        <span class="btn-text">目录</span>
+      </button>
+      <button class="btn btn-icon ghost" id="btnReaderSet" title="排版与主题设置 (Aa)">
+        <svg class="svg-icon"><use href="#icon-font"></use></svg>
+      </button>
+    </div>
   </header>
 
   <main id="content" class="content"></main>
 
-  <footer class="bar bottom" id="bottomBar">
-    <button class="btn ghost" id="btnPrev">上一章</button>
-    <div class="prog"><span id="progText">0%</span><i id="progBar"></i></div>
-    <button class="btn ghost" id="btnNext">下一章</button>
-    <button class="btn primary round" id="btnSpeak" title="朗读">▶</button>
+  <footer class="bar bottom glass" id="bottomBar">
+    <button class="btn ghost btn-nav" id="btnPrev" title="上一章 (PageUp / 方向键左)">
+      <svg class="svg-icon"><use href="#icon-chevron-left"></use></svg>
+      <span>上一章</span>
+    </button>
+
+    <div class="prog-wrapper" id="progWrapper">
+      <div class="prog-meta">
+        <span id="progText" class="prog-text">0%</span>
+        <span id="progChInfo" class="prog-ch-info"></span>
+      </div>
+      <div class="prog-track">
+        <div class="prog-bar-fill" id="progBar"></div>
+      </div>
+    </div>
+
+    <button class="btn ghost btn-nav" id="btnNext" title="下一章 (PageDown / 方向键右)">
+      <span>下一章</span>
+      <svg class="svg-icon"><use href="#icon-chevron-right"></use></svg>
+    </button>
+
+    <button class="btn primary round btn-listen-glow" id="btnSpeak" title="听书 / 朗读 (空格键)">
+      <svg class="svg-icon play-icon"><use href="#icon-play"></use></svg>
+    </button>
   </footer>
 </div>
 
+<!-- ============ 灵动音频悬浮胶囊 ============ -->
+<div id="ttsCapsule" class="tts-capsule hide">
+  <div class="capsule-wave">
+    <span class="wave-bar"></span>
+    <span class="wave-bar"></span>
+    <span class="wave-bar"></span>
+    <span class="wave-bar"></span>
+  </div>
+  
+  <div class="capsule-info" id="capsuleInfo" title="点击展开朗读面板">
+    <div class="capsule-title" id="capsuleTitle">朗读就绪</div>
+    <div class="capsule-meta" id="capsuleMeta">准备播放…</div>
+  </div>
+
+  <div class="capsule-controls">
+    <button class="btn-capsule-ctrl" id="capsulePrev" title="上一句">
+      <svg class="svg-icon"><use href="#icon-prev-step"></use></svg>
+    </button>
+    <button class="btn-capsule-play primary" id="capsulePlay" title="播放 / 暂停">
+      <svg class="svg-icon" id="capsulePlayIcon"><use href="#icon-play"></use></svg>
+    </button>
+    <button class="btn-capsule-ctrl" id="capsuleNext" title="下一句">
+      <svg class="svg-icon"><use href="#icon-next-step"></use></svg>
+    </button>
+    <button class="capsule-speed-badge" id="capsuleSpeedBtn" title="调整语速">
+      <span id="capsuleSpeedText">1.18x</span>
+    </button>
+    <button class="btn-capsule-ctrl" id="capsuleExpand" title="朗读详细配置">
+      <svg class="svg-icon"><use href="#icon-settings"></use></svg>
+    </button>
+    <button class="btn-capsule-ctrl close" id="capsuleClose" title="关闭听书">
+      <svg class="svg-icon"><use href="#icon-close"></use></svg>
+    </button>
+  </div>
+</div>
+
 <!-- ============ 目录抽屉 ============ -->
-<div id="tocDrawer" class="drawer hide">
+<div id="tocDrawer" class="drawer glass hide">
   <div class="drawer-head">
-    <input id="tocSearch" placeholder="搜索本书内容…">
-    <button class="btn ghost" id="btnTocClose">✕</button>
+    <div class="toc-search-wrap">
+      <svg class="svg-icon"><use href="#icon-search"></use></svg>
+      <input id="tocSearch" placeholder="搜索章节或全书内容…" autocomplete="off">
+      <button class="search-clear-btn hide" id="btnTocClear">✕</button>
+    </div>
+    <button class="btn btn-icon ghost" id="btnTocClose" title="关闭目录">
+      <svg class="svg-icon"><use href="#icon-close"></use></svg>
+    </button>
+  </div>
+  <div class="drawer-subhead">
+    <span id="tocCountBadge" class="toc-count-badge">目录</span>
+    <button class="btn ghost sm" id="btnTocScrollCur">定位当前章</button>
   </div>
   <div id="tocList" class="toc-list"></div>
   <div id="searchHits" class="toc-list hide"></div>
 </div>
 <div id="mask" class="mask hide"></div>
 
-<!-- ============ 朗读面板 ============ -->
-<div id="ttsPanel" class="sheet hide">
+<!-- ============ 朗读面板 (底部抽屉) ============ -->
+<div id="ttsPanel" class="sheet glass hide">
   <div class="sheet-grab"></div>
-  <div class="tts-row">
-    <button class="btn round" id="ttsPrev">⏮</button>
-    <button class="btn primary round big" id="ttsPlay">▶</button>
-    <button class="btn round" id="ttsNext">⏭</button>
-    <div class="tts-info">
-      <div id="ttsNow">未开始</div>
-      <div id="ttsHint" class="hint"></div>
+  <div class="sheet-header">
+    <div class="sheet-title">朗读控制</div>
+    <button class="btn btn-icon ghost sheet-close-btn" id="btnTtsPanelClose">✕</button>
+  </div>
+  <div class="tts-playback-card">
+    <div class="tts-row">
+      <button class="btn round" id="ttsPrev" title="上一句">
+        <svg class="svg-icon"><use href="#icon-prev-step"></use></svg>
+      </button>
+      <button class="btn primary round big" id="ttsPlay" title="播放/暂停">
+        <svg class="svg-icon play-big"><use href="#icon-play"></use></svg>
+      </button>
+      <button class="btn round" id="ttsNext" title="下一句">
+        <svg class="svg-icon"><use href="#icon-next-step"></use></svg>
+      </button>
+      <div class="tts-info">
+        <div id="ttsNow">准备就绪</div>
+        <div id="ttsHint" class="hint"></div>
+      </div>
     </div>
   </div>
-  <div class="row">
-    <label>语速 <b id="speedVal">1.0</b></label>
-    <input type="range" id="ttsSpeed" min="0.6" max="2" step="0.02" value="1.18">
+
+  <div class="setting-group">
+    <div class="row">
+      <label>语速 <b id="speedVal" class="value-badge">1.18</b></label>
+      <div class="slider-wrap">
+        <input type="range" id="ttsSpeed" min="0.6" max="2.5" step="0.02" value="1.18">
+      </div>
+    </div>
+    <div class="speed-presets-row">
+      <button class="speed-pill" data-speed="0.8">0.8x</button>
+      <button class="speed-pill" data-speed="1.0">1.0x</button>
+      <button class="speed-pill" data-speed="1.2">1.2x</button>
+      <button class="speed-pill" data-speed="1.5">1.5x</button>
+      <button class="speed-pill" data-speed="1.8">1.8x</button>
+      <button class="speed-pill" data-speed="2.0">2.0x</button>
+    </div>
+    <div class="row">
+      <label>朗读引擎</label>
+      <select id="ttsEngine" class="modern-select">
+        <option value="http">云端 HTTP 接口（Fish Audio / 硅基流动 / OpenAI 等）</option>
+        <option value="web">浏览器自带系统语音（本地离线）</option>
+      </select>
+    </div>
+    <div id="webVoiceRow" class="row hide">
+      <label>系统音色</label>
+      <select id="webVoice" class="modern-select"></select>
+    </div>
+    <div class="row switch-row">
+      <label for="ttsAutoNext">读完自动朗读下一章</label>
+      <label class="switch-toggle">
+        <input type="checkbox" id="ttsAutoNext" checked>
+        <span class="switch-slider"></span>
+      </label>
+    </div>
   </div>
-  <div class="row">
-    <label>引擎</label>
-    <select id="ttsEngine">
-      <option value="http">HTTP 接口（Fish / 硅基流动 / Azure…）</option>
-      <option value="web">浏览器自带语音</option>
-    </select>
-  </div>
-  <div id="webVoiceRow" class="row hide">
-    <label>系统音色</label>
-    <select id="webVoice"></select>
-  </div>
-  <div class="row">
-    <label>读完自动下一章</label>
-    <input type="checkbox" id="ttsAutoNext" class="chk" checked>
-  </div>
-  <button class="btn wide" id="btnTtsCfg">TTS 接口设置（音色 ID / KEY / 模板）</button>
+
+  <button class="btn wide modern-cfg-btn" id="btnTtsCfg">
+    <svg class="svg-icon"><use href="#icon-settings"></use></svg>
+    <span>配置云端接口（音色 ID / API Key / 模板）</span>
+  </button>
 </div>
 
 <!-- ============ 设置面板 ============ -->
-<div id="setPanel" class="sheet hide">
+<div id="setPanel" class="sheet glass hide">
   <div class="sheet-grab"></div>
-  <div class="tabs">
-    <button class="tab active" data-tab="read">阅读</button>
-    <button class="tab" data-tab="tts">朗读</button>
+  <div class="sheet-header">
+    <div class="tabs">
+      <button class="tab active" data-tab="read">
+        <svg class="svg-icon"><use href="#icon-font"></use></svg>
+        <span>排版阅读</span>
+      </button>
+      <button class="tab" data-tab="tts">
+        <svg class="svg-icon"><use href="#icon-headphone"></use></svg>
+        <span>朗读引擎配置</span>
+      </button>
+    </div>
+    <button class="btn btn-icon ghost sheet-close-btn" id="btnSetPanelClose">✕</button>
   </div>
 
+  <!-- 阅读设置标签页 -->
   <div id="tab-read" class="tab-body">
-    <div class="row"><label>字号 <b id="fsVal"></b></label><input type="range" id="setFontSize" min="14" max="32" step="1"></div>
-    <div class="row"><label>行距 <b id="lhVal"></b></label><input type="range" id="setLineHeight" min="1.3" max="2.4" step="0.05"></div>
-    <div class="row"><label>边距 <b id="pdVal"></b></label><input type="range" id="setPadding" min="6" max="40" step="2"></div>
-    <div class="row">
-      <label>翻页方式</label>
-      <div class="seg" id="pageModes">
-        <button data-pm="scroll">滚动</button>
-        <button data-pm="page">整页</button>
-        <button data-pm="slide">左右</button>
+    <div class="setting-group">
+      <div class="row">
+        <label>字号大小</label>
+        <div class="stepper-wrap">
+          <button class="stepper-btn" id="btnFsDec">A-</button>
+          <span class="stepper-val" id="fsVal">19px</span>
+          <button class="stepper-btn" id="btnFsInc">A+</button>
+        </div>
+      </div>
+      <div class="slider-subrow">
+        <input type="range" id="setFontSize" min="14" max="34" step="1">
+      </div>
+
+      <div class="row">
+        <label>行距比例 <b id="lhVal" class="value-badge">1.85</b></label>
+        <div class="slider-wrap">
+          <input type="range" id="setLineHeight" min="1.3" max="2.6" step="0.05">
+        </div>
+      </div>
+
+      <div class="row">
+        <label>页面内边距 <b id="pdVal" class="value-badge">18px</b></label>
+        <div class="slider-wrap">
+          <input type="range" id="setPadding" min="6" max="48" step="2">
+        </div>
       </div>
     </div>
-    <div class="row"><label>读到底自动接下一章（无跳转）</label><input type="checkbox" id="autoCh" class="chk" checked></div>
-    <div class="row"><label>字体</label>
-      <select id="setFont">
-        <option value="system">系统默认</option>
-        <option value="serif">宋体 / 衬线</option>
-        <option value="sans">黑体 / 无衬线</option>
-        <option value="kai">楷体</option>
-      </select>
-    </div>
-    <div class="row"><label>主题</label>
-      <div class="themes" id="themes">
-        <button data-theme="light" style="--c:#f7f7f7;--t:#1b1b1b">白</button>
-        <button data-theme="sepia" style="--c:#f3e9d6;--t:#4a3f2f">米黄</button>
-        <button data-theme="green" style="--c:#dfeee0;--t:#2b3a2c">护眼</button>
-        <button data-theme="dark" style="--c:#161a21;--t:#c8ccd4">夜间</button>
-        <button data-theme="black" style="--c:#000;--t:#9aa0aa">纯黑</button>
+
+    <div class="setting-group">
+      <div class="row col">
+        <label>翻页交互方式</label>
+        <div class="seg modern-seg" id="pageModes">
+          <button data-pm="scroll">
+            <span class="seg-icon">📜</span>
+            <span class="seg-title">垂直滚动</span>
+            <span class="seg-desc">如丝般顺滑</span>
+          </button>
+          <button data-pm="page">
+            <span class="seg-icon">📖</span>
+            <span class="seg-title">仿真整页</span>
+            <span class="seg-desc">点击/滑动翻屏</span>
+          </button>
+          <button data-pm="slide">
+            <span class="seg-icon">📑</span>
+            <span class="seg-title">横向多栏</span>
+            <span class="seg-desc">左右平移翻页</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="row switch-row">
+        <div>
+          <label for="autoCh" style="font-weight:600">无感连续阅读</label>
+          <p class="hint" style="margin:2px 0 0">读到末尾自动把下一章拼在下方，无需跳转等待</p>
+        </div>
+        <label class="switch-toggle">
+          <input type="checkbox" id="autoCh" checked>
+          <span class="switch-slider"></span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label>阅读字体</label>
+        <select id="setFont" class="modern-select">
+          <option value="system">系统默认 (极简无衬线)</option>
+          <option value="serif">文雅宋体 (经典书卷韵味)</option>
+          <option value="sans">现代黑体 (清晰护眼易读)</option>
+          <option value="kai">温润楷体 (传统墨香手笔)</option>
+        </select>
+      </div>
+
+      <div class="row col">
+        <label>视觉主题色彩</label>
+        <div class="themes modern-themes" id="themes">
+          <button data-theme="dark" class="theme-card on" style="--c:#0f1420;--t:#d6dce7;--bd:#253047">
+            <span class="theme-circle" style="background:#0f1420;border:1px solid #334155"></span>
+            <span class="theme-name">星空黑</span>
+          </button>
+          <button data-theme="black" class="theme-card" style="--c:#000000;--t:#a8b0bd;--bd:#222">
+            <span class="theme-circle" style="background:#000000;border:1px solid #333"></span>
+            <span class="theme-name">极夜黑</span>
+          </button>
+          <button data-theme="light" class="theme-card" style="--c:#fafafa;--t:#1f2937;--bd:#e2e8f0">
+            <span class="theme-circle" style="background:#fafafa;border:1px solid #cbd5e1"></span>
+            <span class="theme-name">皓月白</span>
+          </button>
+          <button data-theme="sepia" class="theme-card" style="--c:#f8f1e5;--t:#3d2f20;--bd:#e5d8c3">
+            <span class="theme-circle" style="background:#f8f1e5;border:1px solid #d4c2a5"></span>
+            <span class="theme-name">羊皮纸</span>
+          </button>
+          <button data-theme="green" class="theme-card" style="--c:#e5f0e6;--t:#1d3322;--bd:#c8dcc9">
+            <span class="theme-circle" style="background:#e5f0e6;border:1px solid #a8c8aa"></span>
+            <span class="theme-name">青水绿</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
 
+  <!-- 朗读设置标签页 -->
   <div id="tab-tts" class="tab-body hide">
-    <div class="row"><label>预设</label><select id="ttsPreset"></select></div>
-    <p class="hint" id="presetNote"></p>
-    <div class="row col"><label>接口地址 URL</label><input id="ttsUrl" placeholder="https://api.fish.audio/v1/tts"></div>
-    <div class="row"><label>方法</label>
-      <select id="ttsMethod"><option>POST</option><option>GET</option></select>
-    </div>
-    <div class="row col"><label>请求头（JSON）</label><textarea id="ttsHeaders" rows="3" spellcheck="false"></textarea></div>
-    <div class="row col"><label>请求体模板</label>
-      <textarea id="ttsBody" rows="6" spellcheck="false"></textarea>
-      <p class="hint">可用占位符：<code>{{text}}</code> 正文（自动转义）、<code>{{text_raw}}</code> 原文、<code>{{voice}}</code> 音色 ID、<code>{{speed}}</code> 语速</p>
-    </div>
-    <div class="row col"><label>音色 ID（自己填）</label><input id="ttsVoice" placeholder="Fish：音色页地址栏 /model/ 后面那串"></div>
-    <div class="row col"><label>代理（本机访问境外接口用）</label><input id="ttsProxy" placeholder="http://127.0.0.1:7890"></div>
-    <div class="tts-test">
-      <button class="btn" id="btnTestTts">测试发音</button>
-      <span id="testResult" class="hint"></span>
+    <div class="setting-group">
+      <div class="row">
+        <label>预设模板</label>
+        <select id="ttsPreset" class="modern-select"></select>
+      </div>
+      <p class="hint preset-note-box" id="presetNote"></p>
+      
+      <div class="row col">
+        <label>接口地址 URL</label>
+        <input id="ttsUrl" class="modern-input" placeholder="https://api.fish.audio/v1/tts">
+      </div>
+      
+      <div class="row">
+        <label>请求方法</label>
+        <select id="ttsMethod" class="modern-select" style="max-width:140px">
+          <option>POST</option>
+          <option>GET</option>
+        </select>
+      </div>
+
+      <div class="row col">
+        <label>请求头 (JSON 格式)</label>
+        <textarea id="ttsHeaders" class="modern-code-editor" rows="3" spellcheck="false" placeholder='{"Authorization": "Bearer YOUR_API_KEY"}'></textarea>
+      </div>
+
+      <div class="row col">
+        <label>请求体模板 (JSON / XML)</label>
+        <textarea id="ttsBody" class="modern-code-editor" rows="6" spellcheck="false"></textarea>
+        <div class="template-tags-hint">
+          <span>占位符：</span>
+          <code>{{text}}</code> <span>转义文本</span>
+          <code>{{voice}}</code> <span>音色</span>
+          <code>{{speed}}</code> <span>语速</span>
+        </div>
+      </div>
+
+      <div class="row col">
+        <label>音色 ID (Voice ID)</label>
+        <input id="ttsVoice" class="modern-input" placeholder="例如 Fish Audio 音色链接 /model/ 后面的那一串字符串">
+      </div>
+
+      <div class="row col">
+        <label>网络代理 (本机访问境外接口)</label>
+        <input id="ttsProxy" class="modern-input" placeholder="http://127.0.0.1:7890">
+      </div>
+
+      <div class="tts-test-area">
+        <button class="btn secondary" id="btnTestTts">
+          <svg class="svg-icon"><use href="#icon-sparkle"></use></svg>
+          <span>测试发音并验证</span>
+        </button>
+        <div id="testResult" class="test-result-box"></div>
+      </div>
     </div>
   </div>
 
-  <button class="btn primary wide" id="btnSaveSet">保存</button>
+  <div class="sheet-footer">
+    <button class="btn primary wide btn-save-action" id="btnSaveSet">
+      <span>保存并应用全部设置</span>
+    </button>
+  </div>
 </div>
 
+<!-- ============ 自定义确认弹窗 (无入侵设计) ============ -->
+<div id="confirmModal" class="confirm-modal glass hide">
+  <div class="confirm-card">
+    <div class="confirm-icon-wrap" id="confirmIcon">
+      <svg class="svg-icon"><use href="#icon-trash"></use></svg>
+    </div>
+    <h3 class="confirm-title" id="confirmTitle">确认操作</h3>
+    <p class="confirm-msg" id="confirmMsg">此操作无法撤销，是否继续？</p>
+    <div class="confirm-actions">
+      <button class="btn ghost" id="btnConfirmCancel">取消</button>
+      <button class="btn danger" id="btnConfirmOk">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 全局轻量气泡 Toast ============ -->
 <div id="toast" class="toast hide"></div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

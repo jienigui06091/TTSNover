@@ -1,14 +1,28 @@
-/* 网页版阅读器 —— 前端逻辑（无框架） */
+/* ==========================================================================
+   TTSNover · 现代极简美学阅读器前端逻辑
+   ========================================================================== */
+
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
 const DEFAULTS = {
-  fontSize: 19, lineHeight: 1.85, padding: 18, font: 'system', theme: 'dark',
-  pageMode: 'scroll',              // scroll 滚动 | page 整页 | slide 左右
-  autoCh: true,                    // 滚动到底自动载入下一章
+  fontSize: 19,
+  lineHeight: 1.85,
+  padding: 20,
+  font: 'system',
+  theme: 'dark',
+  pageMode: 'scroll',       // scroll 垂直滚动 | page 仿真整页 | slide 横向多栏
+  autoCh: true,             // 滚动到底无缝自动拼接下一章
   tts: {
-    engine: 'http', url: '', method: 'POST', headers: '', body: '',
-    voice: '', speed: 1.18, proxy: 'http://127.0.0.1:7890', autoNext: true
+    engine: 'http',
+    url: '',
+    method: 'POST',
+    headers: '',
+    body: '',
+    voice: '',
+    speed: 1.18,
+    proxy: 'http://127.0.0.1:7890',
+    autoNext: true
   }
 };
 
@@ -16,12 +30,14 @@ let S = JSON.parse(JSON.stringify(DEFAULTS));
 let book = null, chIdx = 0, chCount = 0, sentences = [], spans = [], units = [];
 let previewing = false;
 let chunks = [];            // 已拼接进正文的章节块（连续阅读）
-let prefetched = new Map(); // idx -> 已取回的章节数据
+let prefetched = new Map(); // idx -> 已提前取回的章节数据
 let appending = false, endMarked = false;
 let presets = {};
 let saveTimer = null;
+let shelfBooksList = [];    // 书架本地缓存列表，用于即时搜索过滤
+let sourcesList = [];       // 书源列表缓存
 
-/* ---------------- 基础工具 ---------------- */
+/* ---------------- 基础工具函数 ---------------- */
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
   const ct = r.headers.get('content-type') || '';
@@ -33,85 +49,189 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r;
 }
-function toast(msg, kind = '', ms = 2600) {
+
+function toast(msg, kind = '', ms = 2800) {
   const t = $('#toast');
+  if (!t) return;
   t.textContent = msg;
-  t.className = 'toast ' + kind;
+  t.className = 'toast ' + (kind || '');
   clearTimeout(t._t);
   t._t = setTimeout(() => t.classList.add('hide'), ms);
 }
+
 function fmtBytes(n) {
+  if (n == null) return '0 B';
   if (n < 1024) return n + ' B';
   if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1048576).toFixed(1) + ' MB';
 }
 
-/* ---------------- 设置 ---------------- */
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+/* 优雅自定义确认对话框 */
+function showConfirm({ title = '确认操作', msg = '此操作无法撤销，是否继续？', okText = '确认', onOk }) {
+  const modal = $('#confirmModal');
+  const t = $('#confirmTitle'), m = $('#confirmMsg'), okBtn = $('#btnConfirmOk'), cancelBtn = $('#btnConfirmCancel');
+  if (t) t.textContent = title;
+  if (m) m.textContent = msg;
+  if (okBtn) okBtn.textContent = okText;
+  
+  const close = () => {
+    modal.classList.add('hide');
+    okBtn.onclick = null;
+    cancelBtn.onclick = null;
+  };
+  
+  okBtn.onclick = () => {
+    close();
+    if (typeof onOk === 'function') onOk();
+  };
+  cancelBtn.onclick = close;
+  modal.onclick = (e) => { if (e.target === modal) close(); };
+  modal.classList.remove('hide');
+}
+
+/* ---------------- 设置加载与应用 ---------------- */
 async function loadSettings() {
   try {
     const s = await api('/api/settings');
     if (s && Object.keys(s).length) {
       S = { ...DEFAULTS, ...s, tts: { ...DEFAULTS.tts, ...(s.tts || {}) } };
     }
-  } catch (e) { console.warn('读设置失败', e); }
+  } catch (e) {
+    console.warn('读取设置失败', e);
+  }
   applyStyle();
 }
+
 async function saveSettings() {
-  try { await api('/api/settings', { method: 'PUT', body: JSON.stringify(S) }); }
-  catch (e) { toast('保存失败：' + e.message, 'err'); }
+  try {
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify(S) });
+  } catch (e) {
+    toast('保存设置失败：' + e.message, 'err');
+  }
 }
+
 function applyStyle() {
   const r = document.documentElement.style;
   r.setProperty('--fs', S.fontSize + 'px');
   r.setProperty('--lh', S.lineHeight);
   r.setProperty('--pd', S.padding + 'px');
-  document.body.dataset.theme = S.theme;
-  document.body.dataset.font = S.font;
-  if (S.pageMode === 'slide') applyPageMode();   // 字号/边距变了，列宽要重算
+  document.body.dataset.theme = S.theme || 'dark';
+  document.body.dataset.font = S.font || 'system';
+
+  // 更新设置弹窗内数值显示
+  const fsVal = $('#fsVal'); if (fsVal) fsVal.textContent = S.fontSize + 'px';
+  const setFs = $('#setFontSize'); if (setFs) setFs.value = S.fontSize;
+  const lhVal = $('#lhVal'); if (lhVal) lhVal.textContent = (+S.lineHeight).toFixed(2);
+  const setLh = $('#setLineHeight'); if (setLh) setLh.value = S.lineHeight;
+  const pdVal = $('#pdVal'); if (pdVal) pdVal.textContent = S.padding + 'px';
+  const setPd = $('#setPadding'); if (setPd) setPd.value = S.padding;
+  const setFont = $('#setFont'); if (setFont) setFont.value = S.font;
+
+  // 主题高亮激活
+  $$('#themes .theme-card').forEach((b) => b.classList.toggle('on', b.dataset.theme === S.theme));
+
+  if (S.pageMode === 'slide') applyPageMode();
 }
 
-/* ---------------- 书架 ---------------- */
+/* ---------------- 书架模块 ---------------- */
 async function loadShelf() {
-  const { books } = await api('/api/books');
+  try {
+    const { books } = await api('/api/books');
+    shelfBooksList = books || [];
+    renderShelfGrid(shelfBooksList);
+  } catch (e) {
+    toast('加载书架失败：' + e.message, 'err');
+  }
+}
+
+function renderShelfGrid(books) {
   const grid = $('#grid');
+  const empty = $('#shelfEmpty');
   grid.innerHTML = '';
-  $('#shelfEmpty').classList.toggle('hide', books.length > 0);
+  
+  if (!books || books.length === 0) {
+    empty.classList.remove('hide');
+    return;
+  }
+  empty.classList.add('hide');
+
   for (const b of books) {
-    const pct = b.ch_count ? Math.min(100, Math.round((b.progress_ch + b.progress_off) / b.ch_count * 100)) : 0;
+    const pct = b.ch_count ? Math.min(100, Math.round((b.progress_ch + (b.progress_off || 0)) / b.ch_count * 100)) : 0;
     const hue = (b.seed * 37) % 360;
     const card = document.createElement('div');
     card.className = 'card';
+    
+    // 生成质感渐变
+    const grad = `linear-gradient(150deg, hsl(${hue} 48% 36%), hsl(${(hue + 45) % 360} 54% 18%))`;
+    
     card.innerHTML = `
-      <div class="cover" style="background:linear-gradient(150deg,hsl(${hue} 46% 38%),hsl(${(hue + 42) % 360} 52% 22%))">
-        <span>${escapeHtml(b.title)}</span>
+      <div class="cover" style="background:${grad}">
+        <div class="cover-title">${escapeHtml(b.title)}</div>
+        <div class="cover-bottom-tag">${pct > 0 ? `已读 ${pct}%` : '未开始'}</div>
       </div>
-      <div class="name">${escapeHtml(b.title)}</div>
-      <div class="meta">${b.ch_count} 章 · ${pct}%</div>
-      <button class="del" title="删除">✕</button>`;
-    card.querySelector('.del').onclick = async (ev) => {
+      <div class="name" title="${escapeHtml(b.title)}">${escapeHtml(b.title)}</div>
+      <div class="meta">
+        <span>${b.ch_count} 章</span>
+        <span class="pct-tag">${pct}%</span>
+      </div>
+      <div class="card-prog-line">
+        <div class="card-prog-fill" style="width:${pct}%"></div>
+      </div>
+      <button class="del" title="从书架移除">
+        <svg class="svg-icon" style="width:14px;height:14px"><use href="#icon-trash"></use></svg>
+      </button>`;
+
+    // 删除事件
+    card.querySelector('.del').onclick = (ev) => {
       ev.stopPropagation();
-      if (!confirm(`删除《${b.title}》？`)) return;
-      await api('/api/books/' + b.id, { method: 'DELETE' });
-      toast('已删除');
-      loadShelf();
+      showConfirm({
+        title: '移除书籍',
+        msg: `确定要从书架移除《${b.title}》吗？书籍文件和阅读进度将被删除。`,
+        okText: '确认移除',
+        onOk: async () => {
+          try {
+            await api('/api/books/' + b.id, { method: 'DELETE' });
+            toast(`已移除《${b.title}》`, 'ok');
+            loadShelf();
+          } catch (err) {
+            toast('删除失败：' + err.message, 'err');
+          }
+        }
+      });
     };
+
     card.onclick = () => openBook(b.id);
     grid.appendChild(card);
   }
 }
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/* 过滤书架 */
+function filterShelf(kw) {
+  kw = (kw || '').trim().toLowerCase();
+  if (!kw) {
+    renderShelfGrid(shelfBooksList);
+    return;
+  }
+  const filtered = shelfBooksList.filter((b) => (b.title || '').toLowerCase().includes(kw));
+  renderShelfGrid(filtered);
 }
 
-/* ---------------- 导入 ---------------- */
+/* ---------------- 本地文件导入 ---------------- */
 async function importFiles(files) {
+  if (!files || !files.length) return;
   for (const f of files) {
-    toast(`正在导入 ${f.name} …`, '', 60000);
+    toast(`正在导入《${f.name}》…`, '', 60000);
     try {
       const r = await api('/api/import?filename=' + encodeURIComponent(f.name), {
         method: 'POST', body: f
       });
-      toast(`《${r.title}》导入成功，${r.chapters} 章`, 'ok');
+      toast(`《${r.title}》导入成功，共 ${r.chapters} 章`, 'ok', 3500);
     } catch (e) {
       toast(`《${f.name}》导入失败：${e.message}`, 'err', 5000);
     }
@@ -119,17 +239,24 @@ async function importFiles(files) {
   loadShelf();
 }
 
-/* ---------------- 阅读 ---------------- */
+/* ---------------- 阅读器核心 ---------------- */
 async function openBook(id) {
-  book = await api('/api/books/' + id);
-  chIdx = Math.min(book.progress_ch || 0, Math.max(0, book.chapters.length - 1));
-  chCount = book.chapters.length;
-  $('#bookTitle').textContent = book.title;
-  $('#shelf').classList.add('hide');
-  $('#reader').classList.remove('hide');
-  renderToc();
-  await loadChapter(chIdx, book.progress_off || 0);
+  try {
+    book = await api('/api/books/' + id);
+    chIdx = Math.min(book.progress_ch || 0, Math.max(0, book.chapters.length - 1));
+    chCount = book.chapters.length;
+    $('#bookTitle').textContent = book.title;
+    const sub = $('#chapterSubTitle');
+    if (sub) sub.textContent = '';
+    $('#shelf').classList.add('hide');
+    $('#reader').classList.remove('hide');
+    renderToc();
+    await loadChapter(chIdx, book.progress_off || 0);
+  } catch (e) {
+    toast('打开书籍失败：' + e.message, 'err');
+  }
 }
+
 async function loadChapter(i, off = 0, keepSpeak = false) {
   if (i < 0 || i >= chCount) return false;
   const wasSpeaking = keepSpeak || speaking;
@@ -147,6 +274,11 @@ async function loadChapter(i, off = 0, keepSpeak = false) {
   previewing = false;
   resetContent();
   appendChunk(i, d);
+
+  // 更新顶部章节副标题
+  const sub = $('#chapterSubTitle');
+  if (sub) sub.textContent = d.title || `第 ${i + 1} 章`;
+
   requestAnimationFrame(() => {
     setScroll(off);
     applyPageMode();
@@ -155,13 +287,15 @@ async function loadChapter(i, off = 0, keepSpeak = false) {
   });
   markTocCurrent();
   prefetchAhead();
+
   if (wasSpeaking) {
     speaking = true;
-    $('#ttsPlay').textContent = '⏸';
+    updatePlayButtonUI(true);
     startFrom(chunks.length ? chunks[0].baseUnit : 0);
   }
   return true;
 }
+
 function splitSentences(t) {
   const ENDS = '。！？!?…；;';
   const parts = [];
@@ -186,7 +320,7 @@ function splitSentences(t) {
   return out;
 }
 
-/* ---------- 朗读单元：纯标点不送 TTS，短句合并 ---------- */
+/* 朗读语义单元断句 */
 const SPEAK_RE = /[0-9A-Za-z\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
 const UNIT_MAX = 90;
 function speakable(t) { return SPEAK_RE.test(t || ''); }
@@ -199,7 +333,7 @@ function cleanForTts(t) {
     .replace(/\s+/g, ' ')
     .trim();
 }
-/* 把段落切成句子，再合并成朗读单元（纯标点句只并入，不单独成单元） */
+
 function computeUnits(paras) {
   const flat = [], us = [];
   let buf = '', from = -1, to = -1;
@@ -220,7 +354,7 @@ function computeUnits(paras) {
         buf += s;
         if (buf.length >= UNIT_MAX) flush();
       } else if (from >= 0) {
-        buf += s;          // 纯标点句并进当前单元，绝不单独送模型
+        buf += s;
         to = idx;
       }
     }
@@ -228,12 +362,13 @@ function computeUnits(paras) {
   }
   return { flat, units: us };
 }
+
 function resetContent() {
   sentences = []; spans = []; units = []; chunks = [];
   curIdx = -1; endMarked = false;
   $('#content').innerHTML = '';
 }
-/* 把一章追加到正文末尾：只往后加，不动滚动位置，所以跨章看不出接缝 */
+
 function appendChunk(i, d) {
   const c = $('#content');
   const wrap = document.createElement('section');
@@ -243,6 +378,7 @@ function appendChunk(i, d) {
   h.className = 'ch-head' + (chunks.length ? '' : ' first');
   h.textContent = d.title || `第 ${i + 1} 章`;
   wrap.appendChild(h);
+  
   const baseSpan = spans.length, baseUnit = units.length;
   let k = baseSpan;
   const paras = d.paras || [];
@@ -267,28 +403,35 @@ function appendChunk(i, d) {
   endMarked = false;
   return chunk;
 }
-/* ---------- 无缝续章：快读到底时静默把下一章拼到后面 ---------- */
+
 function setTtsPanel(open) {
   $('#ttsPanel').classList.toggle('hide', !open);
   document.body.classList.toggle('tts-open', !!open);
   if (open) requestAnimationFrame(() => ensureAhead());
 }
-function readerOpen() { return !$('#reader').classList.contains('hide'); }
+
+function readerOpen() {
+  return !$('#reader').classList.contains('hide');
+}
 
 async function fetchCh(i) {
-  if (prefetched.has(i)) { const d = prefetched.get(i); prefetched.delete(i); return d; }
+  if (prefetched.has(i)) {
+    const d = prefetched.get(i);
+    prefetched.delete(i);
+    return d;
+  }
   return api(`/api/books/${book.id}/ch/${i}`);
 }
-/* 提前把下一章正文取回内存，真要用时不再等网络 */
+
 function prefetchAhead() {
   if (!book || book.id < 0 || previewing) return;
   const last = chunks[chunks.length - 1];
   if (!last) return;
   const n = last.idx + 1;
   if (n >= chCount || prefetched.has(n)) return;
-  api(`/api/books/${book.id}/ch/${n}`).then((d) => prefetched.set(n, d)).catch(() => { });
+  api(`/api/books/${book.id}/ch/${n}`).then((d) => prefetched.set(n, d)).catch(() => {});
 }
-/* 剩余可滚距离不足 2.5 屏 → 该往后铺了 */
+
 function needMore() {
   const c = $('#content');
   const slide = S.pageMode === 'slide';
@@ -297,6 +440,7 @@ function needMore() {
   const view = (slide ? c.clientWidth : c.clientHeight) || 1;
   return total - (pos + view) < view * 2.5;
 }
+
 async function appendNext(silent = true) {
   if (appending || previewing || !book || !chunks.length) return false;
   const i = chunks[chunks.length - 1].idx + 1;
@@ -308,8 +452,7 @@ async function appendNext(silent = true) {
     chCount = d.count || chCount;
     const ch = appendChunk(i, d);
     if (S.pageMode !== 'scroll') requestAnimationFrame(applyPageMode);
-    // 朗读中：顺手把下一章第一句合成好，跨章不留空档
-    if (speaking && S.tts.engine !== 'web' && units[ch.baseUnit]) getAudio(units[ch.baseUnit].text).catch(() => { });
+    if (speaking && S.tts.engine !== 'web' && units[ch.baseUnit]) getAudio(units[ch.baseUnit].text).catch(() => {});
     prefetchAhead();
     return true;
   } catch (e) {
@@ -319,13 +462,14 @@ async function appendNext(silent = true) {
     appending = false;
   }
 }
+
 function ensureAhead() {
   if (previewing || !chunks.length || !readerOpen()) return;
   trimChunks();
   if (S.autoCh === false) return;
   if (needMore()) appendNext();
 }
-/* 长读时丢掉已经远远在头顶上的章节块，避免 DOM 无限膨胀（视觉上无变化） */
+
 function trimChunks() {
   if (S.pageMode === 'slide' || chunks.length <= 16) return;
   const c = $('#content');
@@ -352,25 +496,27 @@ function trimChunks() {
     c.style.scrollBehavior = prev;
   }
 }
+
 function markBookEnd() {
   if (endMarked || previewing || !chunks.length) return;
   endMarked = true;
   const e = document.createElement('div');
   e.className = 'chend';
-  e.innerHTML = '<div class="chend-line">— 全书完 —</div>';
+  e.innerHTML = '<div class="chend-line">— 全书完 · 感谢阅读 —</div>';
   $('#content').appendChild(e);
 }
-/* 朗读快读完当前内容：先把下一章拼好，顺带预热它第一句 */
+
 function warmNextAudio() {
   if (S.tts.engine === 'web' || !book) return;
   appendNext();
 }
+
 function unitOfSpan(i) {
   for (let k = 0; k < units.length; k++) if (i >= units[k].from && i <= units[k].to) return k;
   for (let k = 0; k < units.length; k++) if (units[k].from > i) return k;
   return Math.max(0, units.length - 1);
 }
-/* 定位一律瞬时，不要平滑动画（否则切章会看到“往上滚一下”） */
+
 function setScroll(off) {
   const c = $('#content');
   const prev = c.style.scrollBehavior;
@@ -384,7 +530,7 @@ function setScroll(off) {
   void c.offsetHeight;
   c.style.scrollBehavior = prev;
 }
-/* 滚到当前章开头（切翻页方式/切章后对齐用） */
+
 function scrollToChapterTop() {
   if (!chunks.length) return;
   const c = $('#content');
@@ -397,7 +543,7 @@ function scrollToChapterTop() {
   if (S.pageMode === 'slide') {
     const W = c.clientWidth || 1;
     const target = c.scrollLeft + (hr.left - cr.left);
-    c.scrollLeft = Math.round(target / W) * W;   // 左右模式对齐到整页
+    c.scrollLeft = Math.round(target / W) * W;
   } else {
     c.scrollTop += hr.top - cr.top - 6;
   }
@@ -405,7 +551,7 @@ function scrollToChapterTop() {
   c.style.scrollBehavior = prev;
   updateProgress();
 }
-/* 视口顶部落在哪一章（拼接阅读时 chIdx 随滚动走） */
+
 function syncChFromScroll() {
   if (!chunks.length) return;
   const c = $('#content'), cr = c.getBoundingClientRect();
@@ -418,15 +564,19 @@ function syncChFromScroll() {
     const h = ch.el.querySelector('.ch-head');
     if (!h) continue;
     const r = h.getBoundingClientRect();
-    // 左右模式按「第几页」比较，滚动/整页模式按「是否已到视口顶部」比较（都要扣掉内边距）
     const reached = slide ? Math.round((r.left - cr.left - padL) / W) <= 0 : r.top <= cr.top + padT + 6;
     if (reached) cur = ch;
     else break;
   }
-  if (cur.idx !== chIdx) { chIdx = cur.idx; markTocCurrent(); }
+  if (cur.idx !== chIdx) {
+    chIdx = cur.idx;
+    markTocCurrent();
+    const sub = $('#chapterSubTitle');
+    if (sub) sub.textContent = cur.title || `第 ${chIdx + 1} 章`;
+  }
   return cur;
 }
-/* 本章已读进度 0~1 */
+
 function chapterFrac(cur) {
   if (!cur) return 0;
   const c = $('#content'), cr = c.getBoundingClientRect();
@@ -440,6 +590,7 @@ function chapterFrac(cur) {
   const nx = chunks[k + 1];
   const start = slide ? hr.left : hr.top;
   const pos = slide ? cr.left + padL : cr.top + padT;
+  let end;
   if (nx) {
     const nr = nx.el.querySelector('.ch-head').getBoundingClientRect();
     end = slide ? nr.left : nr.top;
@@ -449,14 +600,19 @@ function chapterFrac(cur) {
   if (end <= start) return 0;
   return Math.min(1, Math.max(0, (pos - start) / (end - start)));
 }
+
 function updateProgress() {
   if (!chunks.length) return;
   const cur = syncChFromScroll();
   const frac = chapterFrac(cur);
   const total = chCount ? (chIdx + frac) / chCount : 0;
   const pct = Math.min(100, Math.round(total * 100));
-  $('#progText').textContent = pct + '%';
-  $('#progBar').style.width = pct + '%';
+  
+  const progText = $('#progText'); if (progText) progText.textContent = pct + '%';
+  const progBar = $('#progBar'); if (progBar) progBar.style.width = pct + '%';
+  const progChInfo = $('#progChInfo');
+  if (progChInfo) progChInfo.textContent = chCount ? `第 ${chIdx + 1} / ${chCount} 章` : '';
+
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     if (!book) return;
@@ -467,15 +623,20 @@ function updateProgress() {
       : Math.max(0, c.getBoundingClientRect().top + (parseFloat(ccs.paddingTop) || 0) - (cur ? cur.el.querySelector('.ch-head').getBoundingClientRect().top : 0));
     api(`/api/books/${book.id}/progress`, {
       method: 'POST', body: JSON.stringify({ ch: chIdx, off })
-    }).catch(() => { });
+    }).catch(() => {});
   }, 900);
 }
 
-/* ---------------- 目录 ---------------- */
+/* ---------------- 目录抽屉 ---------------- */
 function renderToc() {
   const list = $('#tocList');
+  if (!list || !book) return;
   list.innerHTML = '';
-  book.chapters.forEach((c) => {
+  const chapters = book.chapters || [];
+  const badge = $('#tocCountBadge');
+  if (badge) badge.textContent = `共 ${chapters.length} 章`;
+
+  chapters.forEach((c) => {
     const d = document.createElement('div');
     d.className = 'toc-item';
     d.dataset.idx = c.idx;
@@ -484,16 +645,18 @@ function renderToc() {
     list.appendChild(d);
   });
 }
+
 function markTocCurrent() {
-  $$('#tocList .toc-item').forEach((el) =>
-    el.classList.toggle('cur', +el.dataset.idx === chIdx));
+  $$('#tocList .toc-item').forEach((el) => el.classList.toggle('cur', +el.dataset.idx === chIdx));
 }
+
 function openDrawer() {
   $('#tocDrawer').classList.remove('hide');
   $('#mask').classList.remove('hide');
   const cur = $('#tocList .cur');
   if (cur) cur.scrollIntoView({ block: 'center' });
 }
+
 function closeDrawer() {
   $('#tocDrawer').classList.add('hide');
   $('#mask').classList.add('hide');
@@ -502,20 +665,50 @@ function closeDrawer() {
   $('#tocSearch').value = '';
 }
 
-/* ---------------- 朗读 ---------------- */
+/* ---------------- 朗读模块 (TTS & 灵动悬浮胶囊) ---------------- */
 let speaking = false, curIdx = -1, audioEl = new Audio(), audioCache = new Map();
-let currentBlobUrl = null;
 
-function ttsCfg() {
-  return { ...S.tts, engine: S.tts.engine, voice: S.tts.voice, speed: S.tts.speed };
+function setHint(t) {
+  const h = $('#ttsHint'); if (h) h.textContent = t || '';
+  const cm = $('#capsuleMeta'); if (cm) cm.textContent = t || '听书中…';
 }
-function setHint(t) { $('#ttsHint').textContent = t || ''; }
+
+function updatePlayButtonUI(isPlaying) {
+  const icon = isPlaying
+    ? '<svg class="svg-icon play-big"><use href="#icon-pause"></use></svg>'
+    : '<svg class="svg-icon play-big"><use href="#icon-play"></use></svg>';
+  const capIcon = isPlaying ? '#icon-pause' : '#icon-play';
+  
+  const ttsPlay = $('#ttsPlay'); if (ttsPlay) ttsPlay.innerHTML = icon;
+  const capSvg = $('#capsulePlayIcon');
+  if (capSvg) capSvg.innerHTML = `<use href="${capIcon}"></use>`;
+  const btnSpeak = $('#btnSpeak');
+  if (btnSpeak) btnSpeak.innerHTML = `<svg class="svg-icon play-icon"><use href="${capIcon}"></use></svg>`;
+  
+  const capsule = $('#ttsCapsule');
+  if (capsule) capsule.classList.toggle('playing', isPlaying);
+}
+
+function showCapsule() {
+  const cap = $('#ttsCapsule');
+  if (cap) {
+    cap.classList.remove('hide');
+    const speedText = $('#capsuleSpeedText');
+    if (speedText) speedText.textContent = (+S.tts.speed).toFixed(2) + 'x';
+    const capTitle = $('#capsuleTitle');
+    if (capTitle) capTitle.textContent = book ? book.title : 'TTSNover';
+  }
+}
+
+function hideCapsule() {
+  const cap = $('#ttsCapsule');
+  if (cap) cap.classList.add('hide');
+}
 
 async function startFrom(u) {
   if (!units.length) { setHint('本章没有可朗读的文字'); stopSpeak(); return; }
   if (u < 0) u = 0;
   if (u >= units.length) {
-    // 读到当前内容末尾 → 把下一章拼到后面接着读（不重排、不跳转）
     const last = chunks[chunks.length - 1];
     if (S.tts.autoNext !== false && last && last.idx + 1 < chCount) {
       setHint('继续下一章…');
@@ -536,16 +729,22 @@ async function startFrom(u) {
     s.classList.toggle('done', k < un.from);
   });
   scrollToSpan(spans[un.from]);
+
   const text = un.text;
-  $('#ttsNow').textContent = text.length > 60 ? text.slice(0, 60) + '…' : text;
-  setHint(`${u + 1}/${units.length} · ${S.tts.engine === 'web' ? '浏览器语音' : 'HTTP 接口'}`);
+  const ttsNow = $('#ttsNow');
+  if (ttsNow) ttsNow.textContent = text.length > 60 ? text.slice(0, 60) + '…' : text;
+  
+  showCapsule();
+  const capTitle = $('#capsuleTitle');
+  if (capTitle) capTitle.textContent = text.length > 36 ? text.slice(0, 36) + '…' : text;
+
+  setHint(`${u + 1}/${units.length} · ${S.tts.engine === 'web' ? '浏览器语音' : '云端接口'}`);
 
   if (u >= units.length - 2) warmNextAudio();
   if (S.tts.engine === 'web') return speakWeb(text);
   return speakHttp(text);
 }
 
-/* 让正在朗读的句子进入视野（左右翻页模式下按列跳页） */
 function scrollToSpan(sp) {
   if (!sp) return;
   const c = $('#content');
@@ -563,17 +762,17 @@ function scrollToSpan(sp) {
 function speakWeb(text) {
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'zh-CN';
-  u.rate = Math.max(0.5, Math.min(2, +S.tts.speed || 1));
-  const v = $('#webVoice').value;
+  u.rate = Math.max(0.5, Math.min(2.5, +S.tts.speed || 1));
+  const v = $('#webVoice') ? $('#webVoice').value : '';
   const voices = speechSynthesis.getVoices();
   const pick = voices.find((x) => x.voiceURI === v) || voices.find((x) => /zh/i.test(x.lang));
   if (pick) u.voice = pick;
   u.onend = () => { if (speaking) startFrom(curIdx + 1); };
   u.onerror = (e) => {
     if (e.error === 'interrupted' || e.error === 'canceled') return;
-    setHint('浏览器语音出错：' + e.error + '（可在设置里换回 HTTP 接口）');
+    setHint('系统语音出错：' + e.error);
     speaking = false;
-    $('#ttsPlay').textContent = '▶';
+    updatePlayButtonUI(false);
   };
   speechSynthesis.cancel();
   speechSynthesis.speak(u);
@@ -588,7 +787,7 @@ async function getAudio(text) {
   });
   if (!r.ok) {
     let msg = 'HTTP ' + r.status;
-    try { const j = await r.json(); msg = j.error + (j.body ? '\n' + j.body.slice(0, 160) : ''); } catch (e) { }
+    try { const j = await r.json(); msg = j.error + (j.body ? '\n' + j.body.slice(0, 160) : ''); } catch (e) {}
     throw new Error(msg);
   }
   const blob = await r.blob();
@@ -601,40 +800,38 @@ let ttsErrs = 0;
 async function speakHttp(text) {
   let url;
   try {
-    setHint('合成中…');
+    setHint('合成音频中…');
     url = await getAudio(text);
   } catch (e) {
     ttsErrs++;
-    // 单段合成失败不中断整篇：跳过继续读
     if (ttsErrs < 3 && speaking && curIdx + 1 < units.length) {
-      setHint(`这段合成失败（${e.message}），已跳过`);
+      setHint(`合成失败跳过：${e.message}`);
       setTimeout(() => { if (speaking) startFrom(curIdx + 1); }, 400);
       return;
     }
     setHint('失败：' + e.message);
     toast('朗读失败：' + e.message, 'err', 5000);
     speaking = false;
-    $('#ttsPlay').textContent = '▶';
+    updatePlayButtonUI(false);
     return;
   }
-  currentBlobUrl = url;
   audioEl.src = url;
   try {
     await audioEl.play();
   } catch (e) {
-    // 自动播放被浏览器拦截（需要一次用户点击），不是合成失败
-    setHint('浏览器拦截了自动播放，点一下 ▶ 继续');
+    setHint('自动播放被阻止，点一下播放按钮继续');
     speaking = false;
-    $('#ttsPlay').textContent = '▶';
+    updatePlayButtonUI(false);
     return;
   }
   ttsErrs = 0;
   audioEl.onended = () => { if (speaking) startFrom(curIdx + 1); };
-  setHint(`${curIdx + 1}/${units.length} · 播放中`);
-  // 预取后两段
+  setHint(`${curIdx + 1}/${units.length} · 正在播放`);
+  
+  // 预取下一段音频
   for (let k = 1; k <= 2; k++) {
     const n = units[curIdx + k];
-    if (n && !audioCache.has(n.text)) getAudio(n.text).catch(() => { });
+    if (n && !audioCache.has(n.text)) getAudio(n.text).catch(() => {});
   }
 }
 
@@ -643,24 +840,26 @@ function toggleSpeak() {
     speaking = false;
     audioEl.pause();
     speechSynthesis.cancel();
-    $('#ttsPlay').textContent = '▶';
-    setHint('已暂停');
+    updatePlayButtonUI(false);
+    setHint('已暂停播放');
   } else {
     speaking = true;
-    $('#ttsPlay').textContent = '⏸';
+    updatePlayButtonUI(true);
+    showCapsule();
     startFrom(curIdx >= 0 ? curIdx : 0);
   }
 }
+
 function stopSpeak() {
   speaking = false;
   ttsErrs = 0;
   audioEl.pause();
   speechSynthesis.cancel();
-  $('#ttsPlay').textContent = '▶';
+  updatePlayButtonUI(false);
   spans.forEach((s) => s.classList.remove('active', 'done'));
 }
 
-/* ---------------- 翻页方式：滚动 / 整页 / 左右 ---------------- */
+/* ---------------- 翻页模式 ---------------- */
 function applyPageMode() {
   const c = $('#content');
   const m = S.pageMode || 'scroll';
@@ -678,6 +877,7 @@ function applyPageMode() {
   }
   $$('#pageModes button').forEach((b) => b.classList.toggle('on', b.dataset.pm === m));
 }
+
 async function turnPage(dir) {
   const c = $('#content');
   const slide = S.pageMode === 'slide';
@@ -685,11 +885,11 @@ async function turnPage(dir) {
   const step = slide ? W : Math.max(120, c.clientHeight - (S.padding || 0) * 2);
   const pos = () => (slide ? c.scrollLeft : c.scrollTop);
   const max = () => Math.max(0, (slide ? c.scrollWidth : c.scrollHeight) - (slide ? c.clientWidth : c.clientHeight));
+  
   if (dir < 0 && pos() <= 8) { loadChapter(chIdx - 1, 0); return; }
   if (dir > 0 && pos() >= max() - 8) {
-    // 到了已拼接内容的末尾：先把下一章接上，接着翻（不跳转、不清屏）
     if (await appendNext(false)) await new Promise((r) => requestAnimationFrame(r));
-    if (pos() >= max() - 8) { toast('已经是最后一章', '', 1400); return; }
+    if (pos() >= max() - 8) { toast('已经是最后一章了', '', 1600); return; }
   }
   const target = Math.max(0, Math.min(max(), pos() + dir * step));
   if (slide) c.scrollTo({ left: Math.round(target / W) * W, behavior: 'smooth' });
@@ -703,15 +903,18 @@ function openSet(tab = 'read') {
   switchTab(tab);
   fillSetForm();
 }
+
 function closeSet() {
   $('#setPanel').classList.add('hide');
   $('#mask').classList.add('hide');
 }
+
 function switchTab(t) {
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   $('#tab-read').classList.toggle('hide', t !== 'read');
   $('#tab-tts').classList.toggle('hide', t !== 'tts');
 }
+
 function fillSetForm() {
   $('#setFontSize').value = S.fontSize;
   $('#fsVal').textContent = S.fontSize + 'px';
@@ -720,7 +923,7 @@ function fillSetForm() {
   $('#setPadding').value = S.padding;
   $('#pdVal').textContent = S.padding + 'px';
   $('#setFont').value = S.font;
-  $$('#themes button').forEach((b) => b.classList.toggle('on', b.dataset.theme === S.theme));
+  $$('#themes .theme-card').forEach((b) => b.classList.toggle('on', b.dataset.theme === S.theme));
   $$('#pageModes button').forEach((b) => b.classList.toggle('on', b.dataset.pm === (S.pageMode || 'scroll')));
 
   $('#ttsPreset').innerHTML = Object.entries(presets)
@@ -735,10 +938,12 @@ function fillSetForm() {
   $('#ttsSpeed').value = S.tts.speed;
   $('#speedVal').textContent = (+S.tts.speed).toFixed(2);
   $('#ttsAutoNext').checked = S.tts.autoNext !== false;
+  
   const ac = $('#autoCh');
   if (ac) ac.checked = S.autoCh !== false;
   $('#webVoiceRow').classList.toggle('hide', S.tts.engine !== 'web');
 }
+
 function applyPreset(key) {
   const p = presets[key];
   if (!p) return;
@@ -752,10 +957,8 @@ function applyPreset(key) {
   saveSettings();
 }
 
-/* ---------------- 事件绑定 ---------------- */
-
-/* ================= 书源：搜索 / 详情 / 管理 ================= */
-let srcIndex = null;      // 源名 -> id
+/* ---------------- 书源搜索与书籍详情 ---------------- */
+let srcIndex = null;
 let detailBook = null, detailSid = '', detailToc = [];
 
 function showView(id) {
@@ -768,7 +971,8 @@ async function loadSourceIndex(force) {
   if (srcIndex && !force) return srcIndex;
   const r = await api('/api/sources');
   srcIndex = {};
-  for (const s of r.sources || []) srcIndex[s.name] = s.id;
+  sourcesList = r.sources || [];
+  for (const s of sourcesList) srcIndex[s.name] = s.id;
   return srcIndex;
 }
 
@@ -776,23 +980,23 @@ async function doSearch() {
   const kw = $('#searchInput').value.trim();
   if (!kw) return;
   const box = $('#searchRes');
-  box.innerHTML = '<p class="hint" style="padding:14px">正在并发搜索，源多时约 20–60 秒…</p>';
+  box.innerHTML = '<p class="hint" style="padding:18px">正在并发检索各路书源，请稍候…</p>';
   $('#searchStat').textContent = '';
   try {
     const r = await api('/api/src/search?q=' + encodeURIComponent(kw));
     const st = r.stats || {};
     $('#searchStat').textContent =
-      `命中 ${st.ok}/${st.sources} 个源 · ${st.books} 本 · ${((st.ms || 0) / 1000).toFixed(1)}s`;
+      `⚡ 命中 ${st.ok}/${st.sources} 个源 · 发现 ${st.books} 本 · 耗时 ${((st.ms || 0) / 1000).toFixed(1)}s`;
     box.innerHTML = '';
     const groups = (r.results || []).filter((g) => g.books.length);
     if (!groups.length) {
-      box.innerHTML = '<p class="hint" style="padding:14px">没搜到。换个书名试试，或检查「书源」里哪些源还活着。</p>';
+      box.innerHTML = '<p class="hint" style="padding:18px">未检索到相关书籍。可尝试更换关键词，或在「书源」中检查可用书源。</p>';
       return;
     }
     for (const g of groups) {
       const h = document.createElement('div');
       h.className = 'res-group';
-      h.innerHTML = `<b>${escapeHtml(g.source)}</b> ${g.books.length} 本`;
+      h.innerHTML = `<b>${escapeHtml(g.source)}</b> <span>${g.books.length} 本</span>`;
       box.appendChild(h);
       for (const b of g.books.slice(0, 12)) {
         const it = document.createElement('div');
@@ -807,7 +1011,7 @@ async function doSearch() {
       }
     }
   } catch (e) {
-    box.innerHTML = `<p class="hint" style="padding:14px">搜索失败：${escapeHtml(e.message)}</p>`;
+    box.innerHTML = `<p class="hint" style="padding:18px;color:var(--err)">搜索失败：${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -815,7 +1019,7 @@ async function openDetail(sourceName, b) {
   detailBook = b;
   showView('detail');
   $('#detailTitle').textContent = b.name;
-  $('#detailBody').innerHTML = '<p class="hint">正在读取详情与目录，约 2–10 秒…</p>';
+  $('#detailBody').innerHTML = '<p class="hint" style="padding:20px">正在获取书籍详情与最新目录，约需 2–8 秒…</p>';
   await loadSourceIndex();
   detailSid = srcIndex[sourceName] || '';
   let info = {};
@@ -848,19 +1052,22 @@ function renderDetail(b, info, toc) {
     <div class="d-head">${coverHtml}
       <div class="meta">
         <h2>${escapeHtml(name)}</h2>
-        <div class="line">${escapeHtml(author || '佚名')}</div>
-        ${kind ? `<div class="line">${escapeHtml(kind)}</div>` : ''}
-        ${info.lastChapter ? `<div class="line">源站最新章节：${escapeHtml(info.lastChapter)}</div>` : ''}
-        <div class="line">${chs.length ? chs.length + ' 章' : (toc.error ? '目录失败' : '目录为空')}</div>
+        <div class="line">作者：${escapeHtml(author || '佚名')}</div>
+        ${kind ? `<div class="line">类型：${escapeHtml(kind)}</div>` : ''}
+        ${info.lastChapter ? `<div class="line">最新：${escapeHtml(info.lastChapter)}</div>` : ''}
+        <div class="line">${chs.length ? '共 ' + chs.length + ' 章' : (toc.error ? '目录获取失败' : '暂无目录')}</div>
       </div>
     </div>
     ${intro ? `<div class="d-intro">${escapeHtml(intro)}</div>` : ''}
     <div class="d-actions">
-      <button class="btn primary" id="btnAddShelf">加入书架</button>
-      ${chs.length ? '<button class="btn" id="btnPreview">试读第一章</button>' : ''}
+      <button class="btn primary" id="btnAddShelf">
+        <svg class="svg-icon"><use href="#icon-plus"></use></svg>
+        <span>加入书架</span>
+      </button>
+      ${chs.length ? '<button class="btn secondary" id="btnPreview">试读第一章</button>' : ''}
     </div>
-    ${toc.error ? `<p class="hint">目录抓取失败：${escapeHtml(toc.error)}</p>` : ''}
-    ${chs.length ? `<div class="ch-head">目录（前 200 章，共 ${chs.length} 章）</div>
+    ${toc.error ? `<p class="hint" style="color:var(--err)">目录解析出错：${escapeHtml(toc.error)}</p>` : ''}
+    ${chs.length ? `<div class="hint" style="font-weight:600;margin:12px 0 8px">目录速览（展示前 200 章）：</div>
       <div class="ch-list">${chs.slice(0, 200).map((c, i) => `<a data-i="${i}">${escapeHtml(c.name)}</a>`).join('')}</div>` : ''}
   `;
   body.querySelectorAll('.ch-list a').forEach((a) => {
@@ -874,11 +1081,11 @@ function renderDetail(b, info, toc) {
 async function previewChapter(i) {
   const c = detailToc[i];
   if (!c) return;
-  toast('正在抓正文…', '', 30000);
+  toast('正在抓取正文…', '', 30000);
   try {
     const r = await api(`/api/src/ch?sid=${detailSid}&url=${encodeURIComponent(c.url)}&book=${encodeURIComponent(detailBook.url)}`);
     $('#toast').classList.add('hide');
-    if (r.error) { toast('抓取失败：' + r.error, 'err', 4000); return; }
+    if (r.error) { toast('抓取正文失败：' + r.error, 'err', 4000); return; }
     openTextPreview(c.name || detailBook.name, r.content || '');
   } catch (e) { toast('抓取失败：' + e.message, 'err', 4000); }
 }
@@ -888,6 +1095,7 @@ function openTextPreview(title, text) {
   chIdx = 0; chCount = 1;
   previewing = true;
   $('#bookTitle').textContent = title;
+  const sub = $('#chapterSubTitle'); if (sub) sub.textContent = '试读模式';
   showView('reader');
   resetContent();
   appendChunk(0, { title, paras: String(text).split('\n') });
@@ -901,7 +1109,7 @@ async function addToShelf() {
   if (!detailBook) return;
   const btn = $('#btnAddShelf');
   btn.disabled = true;
-  btn.textContent = '正在取目录…';
+  btn.textContent = '正在获取章节数据…';
   try {
     const r = await api('/api/src/add', {
       method: 'POST',
@@ -909,67 +1117,99 @@ async function addToShelf() {
       body: JSON.stringify({
         sid: detailSid,
         book: detailBook,
-        tocUrl: (detailToc && detailToc.length) ? '' : '',
+        tocUrl: '',
         chapters: detailToc.length ? detailToc : undefined,
       }),
     });
-    toast(`已加入书架：${r.chapters} 章`, 'ok');
+    toast(`《${detailBook.name}》已加入书架 (${r.chapters} 章)`, 'ok');
     await loadShelf();
     showView('shelf');
     setTimeout(() => openBook(r.id), 350);
   } catch (e) {
-    toast('加入失败：' + e.message, 'err', 4000);
+    toast('加入书架失败：' + e.message, 'err', 4000);
     btn.disabled = false;
     btn.textContent = '加入书架';
   }
 }
 
+/* ---------------- 书源管理 ---------------- */
 async function openSources() {
   showView('srcmgr');
   const box = $('#srcList');
-  box.innerHTML = '<p class="hint">加载中…</p>';
+  box.innerHTML = '<p class="hint" style="padding:16px">正在加载书源列表…</p>';
   try {
     const r = await api('/api/sources');
-    $('#srcStat').textContent = `共 ${r.total} 个源，启用 ${r.enabled} 个。关掉的源不参与搜索，搜索更快。`;
-    srcIndex = {};
-    for (const s of r.sources) srcIndex[s.name] = s.id;
-    box.innerHTML = '';
-    for (const s of r.sources) {
-      const row = document.createElement('div');
-      row.className = 'src-row';
-      row.innerHTML = `
-        <button class="sw ${s.enabled ? 'on' : ''}" title="启用/停用"></button>
-        <div class="n"><b>${escapeHtml(s.name)}</b><span>${escapeHtml((s.url || '').replace(/^https?:\/\//, '').slice(0, 40))}</span></div>
-        <button class="mini">测试</button>`;
-      row.querySelector('.sw').onclick = async (ev) => {
-        const b = ev.currentTarget;
+    sourcesList = r.sources || [];
+    renderSourcesList(sourcesList);
+  } catch (e) {
+    box.innerHTML = `<p class="hint" style="padding:16px;color:var(--err)">加载失败：${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function renderSourcesList(list) {
+  const box = $('#srcList');
+  box.innerHTML = '';
+  const enabledCount = list.filter((s) => s.enabled).length;
+  $('#srcStat').textContent = `共 ${list.length} 个书源 (已启用 ${enabledCount} 个)`;
+
+  srcIndex = {};
+  for (const s of list) {
+    srcIndex[s.name] = s.id;
+    const row = document.createElement('div');
+    row.className = 'src-row';
+    row.innerHTML = `
+      <button class="sw ${s.enabled ? 'on' : ''}" title="点击启用/停用此书源"></button>
+      <div class="n">
+        <b>${escapeHtml(s.name)}</b>
+        <span>${escapeHtml((s.url || '').replace(/^https?:\/\//, '').slice(0, 42))}</span>
+      </div>
+      <button class="mini" title="单源并发测试">测试</button>`;
+      
+    row.querySelector('.sw').onclick = async (ev) => {
+      const b = ev.currentTarget;
+      try {
         const res = await api(`/api/sources/${s.id}/toggle`, { method: 'POST' });
         b.classList.toggle('on', res.enabled);
         s.enabled = res.enabled;
-      };
-      row.querySelector('.mini').onclick = async (ev) => {
-        const b = ev.currentTarget;
-        b.disabled = true; b.textContent = '测试中';
-        try {
-          const t = await api(`/api/sources/${s.id}/test`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: $('#searchInput').value.trim() || '剑来' }),
-          });
-          const n = t.count != null ? t.count : (t.books || []).length;
-          b.textContent = n ? n + ' 本' : '无结果';
-          toast(n ? `${s.name}：${n} 本` : `${s.name}：${t.error || '没搜到'}`, n ? 'ok' : 'err', 3500);
-        } catch (e) {
-          b.textContent = '失败';
-          toast(s.name + '：' + e.message, 'err', 3500);
-        }
-        setTimeout(() => { b.disabled = false; b.textContent = '测试'; }, 2500);
-      };
-      box.appendChild(row);
-    }
-  } catch (e) {
-    box.innerHTML = `<p class="hint">加载失败：${escapeHtml(e.message)}</p>`;
+        const enCount = sourcesList.filter((x) => x.enabled).length;
+        $('#srcStat').textContent = `共 ${sourcesList.length} 个书源 (已启用 ${enCount} 个)`;
+      } catch (err) {
+        toast('操作失败：' + err.message, 'err');
+      }
+    };
+
+    row.querySelector('.mini').onclick = async (ev) => {
+      const b = ev.currentTarget;
+      b.disabled = true; b.textContent = '测试中…';
+      try {
+        const t = await api(`/api/sources/${s.id}/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: $('#searchInput') ? $('#searchInput').value.trim() || '剑来' : '剑来' }),
+        });
+        const n = t.count != null ? t.count : (t.books || []).length;
+        b.textContent = n ? n + ' 本' : '无结果';
+        toast(n ? `${s.name}：命中 ${n} 本书` : `${s.name}：${t.error || '未搜到内容'}`, n ? 'ok' : 'err', 3500);
+      } catch (e) {
+        b.textContent = '失败';
+        toast(s.name + '：' + e.message, 'err', 3500);
+      }
+      setTimeout(() => { b.disabled = false; b.textContent = '测试'; }, 2500);
+    };
+    box.appendChild(row);
   }
+}
+
+function filterSources(kw) {
+  kw = (kw || '').trim().toLowerCase();
+  if (!kw) {
+    renderSourcesList(sourcesList);
+    return;
+  }
+  const filtered = sourcesList.filter((s) =>
+    (s.name || '').toLowerCase().includes(kw) || (s.url || '').toLowerCase().includes(kw)
+  );
+  renderSourcesList(filtered);
 }
 
 function exportSources(only) {
@@ -984,39 +1224,108 @@ function exportSources(only) {
 }
 
 async function importSourceFile(f) {
-  toast('正在导入书源…', '', 30000);
+  toast('正在导入书源，请稍候…', '', 30000);
   try {
     const r = await api('/api/sources/import', { method: 'POST', body: f });
-    toast(`导入完成：新增 ${r.added}，更新 ${r.updated}，共 ${r.total} 个`, 'ok', 4000);
+    toast(`导入书源成功：新增 ${r.added} 个，更新 ${r.updated} 个，共 ${r.total} 个`, 'ok', 4000);
     srcIndex = null;
     openSources();
   } catch (e) {
-    toast('导入失败：' + e.message, 'err', 4000);
+    toast('导入书源失败：' + e.message, 'err', 4000);
   }
 }
 
+/* ---------------- 事件监听绑定 ---------------- */
 function bind() {
+  // 书架筛选与导入
+  const shelfFilter = $('#shelfFilter');
+  if (shelfFilter) {
+    shelfFilter.oninput = (e) => filterShelf(e.target.value);
+  }
   $('#btnImport').onclick = () => $('#fileInput').click();
+  const emptyImport = $('#btnEmptyImport');
+  if (emptyImport) emptyImport.onclick = () => $('#fileInput').click();
+  const emptyDisc = $('#btnEmptyDiscover');
+  if (emptyDisc) emptyDisc.onclick = () => { showView('discover'); $('#searchInput').focus(); };
+
+  // 拖拽导入支持
+  const dropzone = $('#emptyDropzone');
+  const shelfMain = $('#shelfMain');
+  const handleDrag = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter', 'dragover'].forEach((n) => {
+    window.addEventListener(n, handleDrag);
+    if (dropzone) dropzone.addEventListener(n, () => dropzone.classList.add('dragover'));
+  });
+  ['dragleave', 'drop'].forEach((n) => {
+    window.addEventListener(n, handleDrag);
+    if (dropzone) dropzone.addEventListener(n, () => dropzone.classList.remove('dragover'));
+  });
+  window.addEventListener('drop', (e) => {
+    handleDrag(e);
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      importFiles([...e.dataTransfer.files]);
+    }
+  });
+
+  // 书源页面事件
   $('#btnSrcExportOn').onclick = () => exportSources(true);
   $('#btnSrcExportAll').onclick = () => exportSources(false);
   $('#btnDiscover').onclick = () => { showView('discover'); $('#searchInput').focus(); };
   $('#btnDiscBack').onclick = () => showView('shelf');
   $('#btnDoSearch').onclick = doSearch;
   $('#searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+  
+  const searchClear = $('#btnSearchClear');
+  const searchInput = $('#searchInput');
+  if (searchClear && searchInput) {
+    searchInput.oninput = () => searchClear.classList.toggle('hide', !searchInput.value);
+    searchClear.onclick = () => { searchInput.value = ''; searchClear.classList.add('hide'); searchInput.focus(); };
+  }
+
   $('#btnDetailBack').onclick = () => showView('discover');
   $('#btnSources').onclick = openSources;
   $('#btnSrcBack').onclick = () => showView('shelf');
   $('#btnSrcImport').onclick = () => $('#srcFile').click();
   $('#srcFile').onchange = (e) => { const f = e.target.files[0]; if (f) importSourceFile(f); e.target.value = ''; };
   $('#fileInput').onchange = (e) => { importFiles([...e.target.files]); e.target.value = ''; };
+
+  const srcFilter = $('#srcFilter');
+  if (srcFilter) srcFilter.oninput = (e) => filterSources(e.target.value);
+
+  const srcToggleAll = $('#btnSrcToggleAll');
+  if (srcToggleAll) {
+    srcToggleAll.onclick = async () => {
+      const anyOff = sourcesList.some((s) => !s.enabled);
+      toast(anyOff ? '正在批量开启所有源…' : '正在批量停用所有源…');
+      for (const s of sourcesList) {
+        if (s.enabled !== anyOff) {
+          try {
+            const res = await api(`/api/sources/${s.id}/toggle`, { method: 'POST' });
+            s.enabled = res.enabled;
+          } catch (e) {}
+        }
+      }
+      renderSourcesList(sourcesList);
+      toast('批量设置完成', 'ok');
+    };
+  }
+
+  // 设置面板触发
   $('#btnShelfSet').onclick = () => openSet('read');
-  $('#btnBack').onclick = () => { stopSpeak(); showView('shelf'); loadShelf(); };
+  $('#btnBack').onclick = () => { stopSpeak(); hideCapsule(); showView('shelf'); loadShelf(); };
   $('#btnToc').onclick = openDrawer;
   $('#btnTocClose').onclick = closeDrawer;
-  $('#mask').onclick = () => { closeDrawer(); closeSet(); };
+  const btnSetClose = $('#btnSetPanelClose');
+  if (btnSetClose) btnSetClose.onclick = closeSet;
+  const btnTtsClose = $('#btnTtsPanelClose');
+  if (btnTtsClose) btnTtsClose.onclick = () => setTtsPanel(false);
+
+  $('#mask').onclick = () => { closeDrawer(); closeSet(); setTtsPanel(false); };
   $('#btnReaderSet').onclick = () => openSet('read');
   $('#btnPrev').onclick = () => loadChapter(chIdx - 1, 0);
   $('#btnNext').onclick = () => loadChapter(chIdx + 1, 0);
+
+  // 滚动事件处理
   let scrollRaf = 0;
   $('#content').addEventListener('scroll', () => {
     if (scrollRaf) return;
@@ -1027,12 +1336,13 @@ function bind() {
     });
   }, { passive: true });
 
-  // 点击正文：点句子→从这句读；翻页模式下左右两侧→翻页；中间→开关朗读面板
+  // 触控交互与翻页
   let touchY = 0, touchX = 0, touchT = 0, swiped = false;
   $('#content').addEventListener('touchstart', (e) => {
     touchX = e.touches[0].clientX; touchY = e.touches[0].clientY;
     touchT = Date.now(); swiped = false;
   }, { passive: true });
+  
   $('#content').addEventListener('touchend', (e) => {
     const t = e.changedTouches[0];
     const dx = t.clientX - touchX, dy = t.clientY - touchY;
@@ -1047,78 +1357,127 @@ function bind() {
     if (Math.abs(dy) > Math.abs(dx)) turnPage(dy < 0 ? 1 : -1);
   }, { passive: true });
 
+  // 点击正文处理
   $('#content').addEventListener('click', (e) => {
     if (swiped) { swiped = false; return; }
     if (e.target.classList.contains('s')) {
-      // 点某句 → 从这句所在单元开始朗读
       const i = +e.target.dataset.i;
-      speaking = true; $('#ttsPlay').textContent = '⏸';
-      setTtsPanel(true);
+      speaking = true;
+      updatePlayButtonUI(true);
+      showCapsule();
       startFrom(unitOfSpan(i));
       return;
     }
     const sel = window.getSelection();
     if (sel && sel.toString().length > 0) return;
+
     if (S.pageMode !== 'scroll') {
       const r = $('#content').getBoundingClientRect();
       const x = (e.clientX - r.left) / (r.width || 1);
-      if (x > 0.62) { turnPage(1); return; }
-      if (x < 0.38) { turnPage(-1); return; }
+      if (x > 0.72) { turnPage(1); return; }
+      if (x < 0.28) { turnPage(-1); return; }
     }
-    setTtsPanel($('#ttsPanel').classList.contains('hide'));
+    // 中间区域点击：优雅切换顶部与底部的沉浸式模式
+    document.body.classList.toggle('hud-hidden');
   });
 
+  // 听书与胶囊交互
   $('#btnSpeak').onclick = () => {
-    setTtsPanel(true);
+    if (!speaking && $('#ttsCapsule').classList.contains('hide')) showCapsule();
     toggleSpeak();
   };
   $('#ttsPlay').onclick = toggleSpeak;
-  $('#ttsPrev').onclick = () => { speaking = true; $('#ttsPlay').textContent = '⏸'; startFrom(Math.max(0, curIdx - 1)); };
-  $('#ttsNext').onclick = () => { speaking = true; $('#ttsPlay').textContent = '⏸'; startFrom(curIdx + 1); };
+  $('#ttsPrev').onclick = () => { speaking = true; updatePlayButtonUI(true); startFrom(Math.max(0, curIdx - 1)); };
+  $('#ttsNext').onclick = () => { speaking = true; updatePlayButtonUI(true); startFrom(curIdx + 1); };
+
+  // 灵动胶囊控制器绑定
+  $('#capsulePlay').onclick = toggleSpeak;
+  $('#capsulePrev').onclick = () => { speaking = true; updatePlayButtonUI(true); startFrom(Math.max(0, curIdx - 1)); };
+  $('#capsuleNext').onclick = () => { speaking = true; updatePlayButtonUI(true); startFrom(curIdx + 1); };
+  $('#capsuleClose').onclick = () => { stopSpeak(); hideCapsule(); };
+  $('#capsuleExpand').onclick = () => setTtsPanel(true);
+  $('#capsuleInfo').onclick = () => setTtsPanel(true);
+
+  // 语速快捷轮转
+  const SPEEDS = [0.8, 1.0, 1.18, 1.5, 1.8, 2.0];
+  $('#capsuleSpeedBtn').onclick = () => {
+    const cur = +S.tts.speed || 1.18;
+    let next = SPEEDS.find((s) => s > cur + 0.05);
+    if (!next) next = SPEEDS[0];
+    S.tts.speed = next;
+    $('#speedVal').textContent = next.toFixed(2);
+    $('#ttsSpeed').value = next;
+    $('#capsuleSpeedText').textContent = next.toFixed(2) + 'x';
+    saveSettings();
+    toast(`语速调整为 ${next.toFixed(2)}x`);
+  };
+
   $('#ttsSpeed').oninput = (e) => {
     S.tts.speed = +e.target.value;
     $('#speedVal').textContent = S.tts.speed.toFixed(2);
+    $('#capsuleSpeedText').textContent = S.tts.speed.toFixed(2) + 'x';
     saveSettings();
   };
+
+  // 语速预设胶囊按钮
+  $$('.speed-pill').forEach((btn) => {
+    btn.onclick = () => {
+      const sp = +btn.dataset.speed;
+      S.tts.speed = sp;
+      $('#speedVal').textContent = sp.toFixed(2);
+      $('#ttsSpeed').value = sp;
+      $('#capsuleSpeedText').textContent = sp.toFixed(2) + 'x';
+      $$('.speed-pill').forEach((x) => x.classList.toggle('active', x === btn));
+      saveSettings();
+    };
+  });
+
   $('#ttsEngine').onchange = (e) => {
     S.tts.engine = e.target.value;
     $('#webVoiceRow').classList.toggle('hide', S.tts.engine !== 'web');
     saveSettings();
   };
-  $('#btnTtsCfg').onclick = () => { closeDrawer(); openSet('tts'); };
+  $('#btnTtsCfg').onclick = () => { setTtsPanel(false); openSet('tts'); };
 
-  // 设置面板
-  $$('.tab').forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
-  $('#setFontSize').oninput = (e) => { S.fontSize = +e.target.value; $('#fsVal').textContent = S.fontSize + 'px'; applyStyle(); };
-  $('#setLineHeight').oninput = (e) => { S.lineHeight = +e.target.value; $('#lhVal').textContent = S.lineHeight.toFixed(2); applyStyle(); };
-  $('#setPadding').oninput = (e) => { S.padding = +e.target.value; $('#pdVal').textContent = S.padding + 'px'; applyStyle(); };
-  $('#setFont').onchange = (e) => { S.font = e.target.value; applyStyle(); };
+  // 排版步进器
+  $('#btnFsDec').onclick = () => {
+    S.fontSize = Math.max(14, S.fontSize - 1);
+    applyStyle();
+    saveSettings();
+  };
+  $('#btnFsInc').onclick = () => {
+    S.fontSize = Math.min(34, S.fontSize + 1);
+    applyStyle();
+    saveSettings();
+  };
+  $('#setFontSize').oninput = (e) => { S.fontSize = +e.target.value; applyStyle(); saveSettings(); };
+  $('#setLineHeight').oninput = (e) => { S.lineHeight = +e.target.value; applyStyle(); saveSettings(); };
+  $('#setPadding').oninput = (e) => { S.padding = +e.target.value; applyStyle(); saveSettings(); };
+  $('#setFont').onchange = (e) => { S.font = e.target.value; applyStyle(); saveSettings(); };
+
   $$('#pageModes button').forEach((b) => b.onclick = () => {
     S.pageMode = b.dataset.pm;
     applyPageMode();
     requestAnimationFrame(() => { scrollToChapterTop(); ensureAhead(); });
     saveSettings();
-    toast('翻页方式：' + b.textContent);
+    toast('已切换翻页方式：' + b.querySelector('.seg-title').textContent);
   });
+
   $('#ttsAutoNext').onchange = (e) => { S.tts.autoNext = e.target.checked; saveSettings(); };
   $('#autoCh').onchange = (e) => {
     S.autoCh = e.target.checked;
     saveSettings();
     if (S.autoCh) ensureAhead();
   };
-  window.addEventListener('resize', () => {
-    if (S.pageMode !== 'slide') return;
-    const c = $('#content');
-    const max = Math.max(0, c.scrollWidth - c.clientWidth);
-    const ratio = max > 0 ? c.scrollLeft / max : 0;
-    applyPageMode();
-    c.scrollLeft = ratio * Math.max(0, c.scrollWidth - c.clientWidth);
+
+  $$('#themes .theme-card').forEach((b) => b.onclick = () => {
+    S.theme = b.dataset.theme;
+    applyStyle();
+    saveSettings();
   });
-  $$('#themes button').forEach((b) => b.onclick = () => {
-    S.theme = b.dataset.theme; applyStyle();
-    $$('#themes button').forEach((x) => x.classList.toggle('on', x === b));
-  });
-  $('#ttsPreset').onchange = (e) => applyPreset(e.target.value);
+
+  $$('.tab').forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
+
   $('#btnSaveSet').onclick = async () => {
     S.tts.url = $('#ttsUrl').value.trim();
     S.tts.method = $('#ttsMethod').value;
@@ -1128,71 +1487,105 @@ function bind() {
     S.tts.proxy = $('#ttsProxy').value.trim();
     await saveSettings();
     audioCache.clear();
-    toast('已保存', 'ok');
+    toast('设置已成功保存', 'ok');
     closeSet();
   };
+
   $('#btnTestTts').onclick = async () => {
     const cfg = {
-      url: $('#ttsUrl').value.trim(), method: $('#ttsMethod').value,
-      headers: $('#ttsHeaders').value, body: $('#ttsBody').value,
-      proxy: $('#ttsProxy').value.trim(), engine: 'http'
+      url: $('#ttsUrl').value.trim(),
+      method: $('#ttsMethod').value,
+      headers: $('#ttsHeaders').value,
+      body: $('#ttsBody').value,
+      proxy: $('#ttsProxy').value.trim(),
+      engine: 'http'
     };
     const voice = $('#ttsVoice').value.trim();
-    $('#testResult').textContent = '测试中…';
+    const box = $('#testResult');
+    box.classList.add('show');
+    box.innerHTML = '<span style="color:var(--dim)">正在连接服务合成语音测试…</span>';
+
     try {
       const r = await api('/api/tts/test', {
         method: 'POST',
         body: JSON.stringify({ text: '你好，这是一次朗读测试。', voice, speed: +S.tts.speed, cfg })
       });
       if (r.ok) {
-        $('#testResult').innerHTML =
-          `<span style="color:var(--ok)">✓ 成功</span> ${fmtBytes(r.bytes)} · ${r.content_type} · ${r.ms}ms`;
-        // 顺便保存这份配置，然后试听
+        box.innerHTML = `<span style="color:var(--ok);font-weight:600">✓ 测试成功</span> · 大小: ${fmtBytes(r.bytes)} · 耗时: ${r.ms}ms · 类型: ${r.content_type}`;
         S.tts = { ...S.tts, ...cfg, voice };
         await saveSettings();
         const resp = await fetch('/api/tts', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: '你好，这是一次朗读测试。', voice, speed: +S.tts.speed, cache: false })
         });
-        if (resp.ok) { audioEl.src = URL.createObjectURL(await resp.blob()); audioEl.play(); }
+        if (resp.ok) {
+          audioEl.src = URL.createObjectURL(await resp.blob());
+          audioEl.play();
+        }
       } else {
-        $('#testResult').innerHTML =
-          `<span style="color:var(--err)">✗ ${escapeHtml(r.error || '失败')}</span>` +
-          (r.status ? ` HTTP ${r.status}` : '') +
-          (r.body ? `<br><code>${escapeHtml(String(r.body).slice(0, 200))}</code>` : '');
+        box.innerHTML = `<span style="color:var(--err);font-weight:600">✗ ${escapeHtml(r.error || '测试失败')}</span>` +
+          (r.status ? ` (HTTP ${r.status})` : '') +
+          (r.body ? `<br><code style="margin-top:4px;display:block">${escapeHtml(String(r.body).slice(0, 180))}</code>` : '');
       }
     } catch (e) {
-      $('#testResult').innerHTML = `<span style="color:var(--err)">✗ ${escapeHtml(e.message)}</span>`;
+      box.innerHTML = `<span style="color:var(--err)">✗ 接口调用失败：${escapeHtml(e.message)}</span>`;
     }
   };
 
-  // 目录搜索
+  // 目录内搜索
   let st = null;
-  $('#tocSearch').oninput = (e) => {
-    clearTimeout(st);
-    const kw = e.target.value.trim();
-    if (!kw) { $('#searchHits').classList.add('hide'); $('#tocList').classList.remove('hide'); return; }
-    st = setTimeout(async () => {
-      const { hits } = await api(`/api/books/${book.id}/search?q=${encodeURIComponent(kw)}`);
-      const box = $('#searchHits');
-      box.innerHTML = hits.length ? '' : '<p class="empty">没搜到</p>';
-      hits.forEach((h) => {
-        const d = document.createElement('div');
-        d.className = 'toc-item';
-        d.innerHTML = `<span class="n">${h.idx + 1}</span><span><b>${escapeHtml(h.title)}</b><br>
-          <span class="sn">${escapeHtml(h.snippet)}</span></span>`;
-        d.onclick = () => { closeDrawer(); loadChapter(h.idx, 0); };
-        box.appendChild(d);
-      });
-      box.classList.remove('hide');
-      $('#tocList').classList.add('hide');
-    }, 350);
-  };
+  const tocSearch = $('#tocSearch');
+  const tocClear = $('#btnTocClear');
+  if (tocSearch && tocClear) {
+    tocSearch.oninput = (e) => {
+      clearTimeout(st);
+      const kw = e.target.value.trim();
+      tocClear.classList.toggle('hide', !kw);
+      if (!kw) {
+        $('#searchHits').classList.add('hide');
+        $('#tocList').classList.remove('hide');
+        return;
+      }
+      st = setTimeout(async () => {
+        try {
+          const { hits } = await api(`/api/books/${book.id}/search?q=${encodeURIComponent(kw)}`);
+          const box = $('#searchHits');
+          box.innerHTML = hits.length ? '' : '<p class="hint" style="padding:16px;text-align:center">未找到匹配内容</p>';
+          hits.forEach((h) => {
+            const d = document.createElement('div');
+            d.className = 'toc-item';
+            d.innerHTML = `<span class="n">${h.idx + 1}</span><span><b>${escapeHtml(h.title)}</b><br>
+              <span class="sn">${escapeHtml(h.snippet)}</span></span>`;
+            d.onclick = () => { closeDrawer(); loadChapter(h.idx, 0); };
+            box.appendChild(d);
+          });
+          box.classList.remove('hide');
+          $('#tocList').classList.add('hide');
+        } catch (err) {}
+      }, 350);
+    };
 
-  // 系统语音列表
+    tocClear.onclick = () => {
+      tocSearch.value = '';
+      tocClear.classList.add('hide');
+      $('#searchHits').classList.add('hide');
+      $('#tocList').classList.remove('hide');
+    };
+  }
+
+  const btnScrollCur = $('#btnTocScrollCur');
+  if (btnScrollCur) {
+    btnScrollCur.onclick = () => {
+      const cur = $('#tocList .cur');
+      if (cur) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    };
+  }
+
+  // 系统自带语音识别加载
   const fillVoices = () => {
     const sel = $('#webVoice');
-    if (!sel) return;
+    if (!sel || !('speechSynthesis' in window)) return;
     sel.innerHTML = speechSynthesis.getVoices()
       .map((v) => `<option value="${v.voiceURI}">${escapeHtml(v.name)} (${v.lang})</option>`).join('');
   };
@@ -1200,7 +1593,14 @@ function bind() {
     speechSynthesis.onvoiceschanged = fillVoices;
     fillVoices();
   }
+
+  // 全局快捷键
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeDrawer(); closeSet(); setTtsPanel(false);
+      $('#confirmModal').classList.add('hide');
+      return;
+    }
     if ($('#reader').classList.contains('hide')) return;
     if (e.key === 'PageDown') { e.preventDefault(); loadChapter(chIdx + 1, 0); return; }
     if (e.key === 'PageUp') { e.preventDefault(); loadChapter(chIdx - 1, 0); return; }
@@ -1210,15 +1610,25 @@ function bind() {
       else turnPage(d);
       return;
     }
-    if (e.key === ' ') { e.preventDefault(); toggleSpeak(); }
+    if (e.key === ' ') {
+      // 避免输入框按空格触发听书
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+      e.preventDefault();
+      toggleSpeak();
+      return;
+    }
+    if (e.key === 'm' || e.key === 'M') {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+      $('#tocDrawer').classList.contains('hide') ? openDrawer() : closeDrawer();
+    }
   });
 }
 
-/* ---------------- 启动 ---------------- */
+/* ---------------- 初始化运行 ---------------- */
 (async function init() {
   bind();
   await loadSettings();
   applyPageMode();
-  try { presets = (await api('/api/presets')).presets; } catch (e) { }
+  try { presets = (await api('/api/presets')).presets; } catch (e) {}
   await loadShelf();
 })();
