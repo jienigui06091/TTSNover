@@ -1,0 +1,46 @@
+[Unit]
+Description=Web Reader (TTSNover) - uvicorn 8848
+Documentation=https://github.com/jienigui06091/TTSNover
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webreader
+Group=webreader
+WorkingDirectory=/opt/webreader
+
+# node 要给搜书子进程用；venv 里的 uvicorn 直接跑 app:app
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=WEBREADER_DATA=/var/lib/webreader
+Environment=AUTH_ENFORCE=1
+Environment=SEARCH_CONC=10
+Environment=SEARCH_MAX=2
+Environment=TTS_PER_MIN=120
+Environment=NODE_ENV=production
+
+# 只监听回环，TLS 交给前面的 Caddy
+# --proxy-headers：让 X-Forwarded-Proto 生效，登录 Cookie 才会带 Secure
+ExecStart=/opt/webreader/.venv/bin/uvicorn app:app \
+    --host 127.0.0.1 --port 8848 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1 \
+    --log-level info
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+# 加固：代码只读，只有数据目录可写
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/webreader
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

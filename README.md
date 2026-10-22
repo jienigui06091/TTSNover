@@ -156,6 +156,10 @@ webreader/
 ├── tools/migrate_multiuser.py  # 单用户库 → 多用户库迁移（备份 + 事务）
 ├── tools/src_health.py  # 书源体检，自动停用死源
 ├── static/{index.html,login.html,app.js,style.css}
+├── deploy/webreader.service    # 云服务器 systemd（system 级，非 --user）
+├── deploy/Caddyfile            # 反代 + 自动 HTTPS
+├── deploy/backup.sh            # SQLite backup API 快照 + 轮转
+├── docs/DEPLOY.md              # 从零上云的完整步骤
 ├── requirements.txt     # fastapi / uvicorn / cryptography
 ├── sample/测试书.txt     # 演示用
 └── data/                # 运行时生成（不进 Git）
@@ -165,17 +169,29 @@ webreader/
 
 ## 云服务器 / App 部署
 
-1. 装依赖：`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
-2. 数据搬家：`WEBREADER_DATA=/var/lib/webreader`，把 `data/` 内容拷过去
-3. **必须上 HTTPS**（否则密码/token 明文过网）：Caddy 两行搞定，Cookie 会自动带 `Secure`
-   ```
-   your.domain.com {
-       reverse_proxy 127.0.0.1:8848
-   }
-   ```
-4. systemd 用 `app.py` 的启动方式：`.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8848`（前面有 Caddy 时只监听 127.0.0.1）
-5. App 端：`POST /api/auth/login` 拿 `token`，之后所有请求带 `Authorization: Bearer <token>`；接口文档 `GET /api/docs`
-6. 容量参考：2 核 2 GB 能跑（搜书并发已限到 `SEARCH_CONC=10`，峰值约 700 MB）；宽裕用 2 核 4 GB + 20 GB 盘
+完整步骤见 **[docs/DEPLOY.md](docs/DEPLOY.md)**（Ubuntu 24.04，从装系统依赖到 HTTPS、备份、升级、排障）。
+仓库里现成的三件套直接拷过去改域名就能用：
+
+| 文件 | 用途 |
+| --- | --- |
+| `deploy/webreader.service` | system 级 systemd：专用用户 `webreader`，只监听 `127.0.0.1:8848`，`ProtectSystem=strict` + 只有数据目录可写 |
+| `deploy/Caddyfile` | 自动申请证书、HTTP→HTTPS、长超时（TTS 一次可能跑 5–170 秒）、`/data/*` 直接 404 |
+| `deploy/backup.sh` | 用 `sqlite3.backup()` 取一致快照（WAL 库 `cp` 会漏写）+ 按份数轮转 |
+
+要点：
+
+1. **8848 不对外**，公网只开 80/443；Caddy 反代到 `127.0.0.1:8848`
+2. **必须上 HTTPS**，否则密码/token 明文过网；后端加 `--proxy-headers --forwarded-allow-ips=127.0.0.1`，
+   Cookie 才会自动带 `Secure`
+3. 数据放 `/var/lib/webreader`（`WEBREADER_DATA`）；搬老库前先停服务并用 `backup.sh` 取快照，
+   别直接 `rsync data/reader.db`
+4. **`data/secret.key` 必须一起搬并单独离线备份**——丢了它，用户存的 API Key 全部解不开
+   （也可改用 `WEBREADER_MASTER_KEY` 环境变量）
+5. 搜书要 `node`：`cd srce && npm install --omit=dev`，unit 里已带 `PATH`
+6. App 端：`POST /api/auth/login` 拿 `token`，之后每个请求带 `Authorization: Bearer <token>`；接口文档 `GET /api/docs`
+7. 容量参考：2 核 2 GB 能跑（`SEARCH_CONC=10`、全服 2 个搜索任务，峰值约 700 MB）；
+   宽裕用 2 核 4 GB + 20 GB 盘
+8. 开放注册意味着陌生人能用你的 CPU/带宽跑搜书和 TTS；只给朋友用就关掉注册或加邀请码
 
 ## 还没做的（和原 App 的差距）
 

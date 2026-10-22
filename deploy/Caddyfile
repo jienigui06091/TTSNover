@@ -1,0 +1,36 @@
+# /etc/caddy/Caddyfile —— 把 reader.example.com 换成你自己的域名
+#
+# 前置：域名 A/AAAA 记录已指向这台机器，云防火墙放行 80 + 443（8848 不对外）。
+# Caddy 会自动申请并续期 Let's Encrypt 证书；它默认就会给上游带
+# X-Forwarded-For / X-Forwarded-Proto，后端据此给登录 Cookie 加 Secure，
+# 限流也靠这个拿到真实客户端 IP（Caddy 默认忽略客户端自己伪造的 XFF）。
+{
+	email you@example.com
+}
+
+reader.example.com {
+	encode zstd gzip
+
+	# 上传/导入书籍时体积较大，放宽一点
+	request_body {
+		max_size 64MB
+	}
+
+	# 长连接要留给 TTS（一次可能跑 5-170 秒）和搜书
+	reverse_proxy 127.0.0.1:8848 {
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	# 数据/日志不外泄
+	respond /data/* 404
+
+	log {
+		output file /var/log/caddy/webreader.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}
