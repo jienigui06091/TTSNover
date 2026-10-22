@@ -7,14 +7,17 @@
   books 追加：cover, src_id, src_name, src_url
   chapters 追加：url, fetched（0=只有链接，正文按需抓取）
 """
+import concurrent.futures
 import hashlib
 import json
 import os
-
-import paths
+import re
 import sqlite3
 import subprocess
+import threading
 import time
+
+import paths
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = paths.DB
@@ -33,6 +36,18 @@ CREATE TABLE IF NOT EXISTS sources(
   raw TEXT NOT NULL,
   added REAL,
   PRIMARY KEY(user_id, id)
+);
+-- 书源健康度：连续失败到一定次数就先跳过，冷却结束再半开重试（死源不再拖慢每次搜索）
+CREATE TABLE IF NOT EXISTS source_health(
+  user_id INTEGER NOT NULL,
+  sid TEXT NOT NULL,
+  ok INTEGER DEFAULT 0,
+  fail INTEGER DEFAULT 0,
+  streak INTEGER DEFAULT 0,
+  last_ok REAL DEFAULT 0,
+  last_fail REAL DEFAULT 0,
+  skip_until REAL DEFAULT 0,
+  PRIMARY KEY(user_id, sid)
 );
 """
 
@@ -109,6 +124,7 @@ def import_sources(uid, raw_bytes):
                 updated += 1
             else:
                 added += 1
+    cache_clear(uid)
     return added, updated
 
 
@@ -172,13 +188,15 @@ def toggle_source(uid, sid, enabled=None):
                       (1 if enabled else 0, int(uid), sid))
         r = c.execute("SELECT enabled FROM sources WHERE user_id=? AND id=?",
                       (int(uid), sid)).fetchone()
+    cache_clear(uid)
     return None if not r else bool(r["enabled"])
 
 
 def delete_source(uid, sid):
     with conn() as c:
         cur = c.execute("DELETE FROM sources WHERE user_id=? AND id=?", (int(uid), sid))
-        return cur.rowcount or 0
+    cache_clear(uid)
+    return cur.rowcount or 0
 
 
 def call(job, timeout=120):
@@ -198,46 +216,309 @@ def call(job, timeout=120):
 
 
 # ---------------- 搜索 ----------------
-def search(uid, key, source_ids=None, page=1, limit=None, timeout=90):
-    """并发搜索多个源；返回 (结果列表, 统计)"""
-    srcs = []
+# 单源超时：站点 3 秒不回基本就没戏，久等只会拖住整轮搜索
+SRC_TIMEOUT = float(os.environ.get("SEARCH_SRC_TIMEOUT", "6"))
+# 一轮搜索的总预算，到点就带着已有结果收工（前端是流式的，慢源不影响先看结果）
+SEARCH_BUDGET = float(os.environ.get("SEARCH_BUDGET", "12"))
+CONC = max(1, int(os.environ.get("SEARCH_CONC", "10")))
+CACHE_TTL = int(os.environ.get("SEARCH_CACHE_TTL", "600"))
+# 连续失败 n 次后的冷却秒数（第 1 次失败不冷却，避免偶发抖动就拉黑）
+HEALTH_BACKOFF = (0, 0, 120, 300, 900, 3600)
+
+_cache = {}
+_cache_lock = threading.Lock()
+_health_ready = False
+
+
+def cache_get(uid, key, page=1, include_dead=False):
+    """同关键词短 TTL 缓存；命中直接返回 (results, stat)，否则 None。"""
+    ck = (int(uid), (key or "").strip().lower(), int(page or 1), bool(include_dead))
+    with _cache_lock:
+        hit = _cache.get(ck)
+    if not hit:
+        return None
+    if time.time() - hit[0] >= CACHE_TTL:
+        with _cache_lock:
+            _cache.pop(ck, None)
+        return None
+    stat = dict(hit[2])
+    stat["cached"] = True
+    return [dict(r) for r in hit[1]], stat
+
+
+def cache_put(uid, key, page, include_dead, results, stat):
+    if not results:
+        return
+    ck = (int(uid), (key or "").strip().lower(), int(page or 1), bool(include_dead))
+    st = dict(stat)
+    st["cached"] = False
+    ordered = sorted(results, key=lambda x: (-len(x.get("books") or []), x.get("source") or ""))
+    with _cache_lock:
+        if len(_cache) > 200:
+            for k in sorted(_cache, key=lambda k: _cache[k][0])[:50]:
+                _cache.pop(k, None)
+        _cache[ck] = (time.time(), ordered, st)
+
+
+def cache_clear(uid=None):
+    """书源增删改后清缓存，否则会拿旧源的结果糊弄人。"""
+    with _cache_lock:
+        if uid is None:
+            _cache.clear()
+        else:
+            for k in [k for k in _cache if k[0] == int(uid)]:
+                _cache.pop(k, None)
+
+
+def _plain(s):
+    return re.sub(r"\s+", "", str(s or "")).lower()
+
+
+def _strip_author(s):
+    return re.sub(r"^(作\s*者|author)\s*[:：]\s*", "", str(s or ""), flags=re.I).strip()
+
+
+def _rank_books(books, key):
+    """按「书名/作者命中关键词」打分排序。
+
+    很多站点的搜索是模糊匹配，搜作者会混进一堆不相关的书；
+    打分后作者命中的书排到前面，并在每本书上标 matched，前端可据此过滤。
+    """
+    k = _plain(key)
+    scored = []
+    for b in books or []:
+        name = _plain(b.get("name"))
+        author = _plain(_strip_author(b.get("author")))
+        if not k:
+            score, hit = 1, ""
+        elif name == k:
+            score, hit = 100, "name"
+        elif author and author == k:
+            score, hit = 90, "author"
+        elif name.startswith(k):
+            score, hit = 70, "name"
+        elif author.startswith(k):
+            score, hit = 60, "author"
+        elif k in name:
+            score, hit = 50, "name"
+        elif author and k in author:
+            score, hit = 40, "author"
+        else:
+            score, hit = 1, ""
+        scored.append((score, hit, b))
+    scored.sort(key=lambda x: -x[0])  # 稳定排序：同分保持站点原始顺序
+    out = []
+    for _score, hit, b in scored:
+        out.append(
+            {
+                "name": b.get("name", ""),
+                "author": b.get("author", ""),
+                "kind": b.get("kind", ""),
+                "intro": b.get("intro", ""),
+                "cover": b.get("coverUrl") or b.get("cover", ""),
+                "url": b.get("bookUrl") or b.get("url", ""),
+                "lastChapter": b.get("lastChapter", ""),
+                "matched": hit,
+            }
+        )
+    return out
+
+
+def _ensure_health_table():
+    """source_health 是后加的，老库/测试副本可能还没有，用到时补建一次。"""
+    global _health_ready
+    if _health_ready:
+        return
+    with conn() as c:
+        c.executescript(SCHEMA)
+    _health_ready = True
+
+
+def _health(uid):
+    _ensure_health_table()
+    with conn() as c:
+        return {
+            r["sid"]: dict(r)
+            for r in c.execute(
+                "SELECT sid,ok,fail,streak,last_ok,skip_until FROM source_health WHERE user_id=?",
+                (int(uid),),
+            )
+        }
+
+
+def _save_health(uid, stats):
+    """stats: {sid: 是否成功}，一轮搜索结束一次性写回。"""
+    now = time.time()
+    with conn() as c:
+        for sid, ok in stats.items():
+            r = c.execute(
+                "SELECT ok,fail,streak FROM source_health WHERE user_id=? AND sid=?",
+                (int(uid), sid),
+            ).fetchone()
+            o, f, streak = (r["ok"], r["fail"], r["streak"]) if r else (0, 0, 0)
+            if ok:
+                c.execute(
+                    "INSERT OR REPLACE INTO source_health"
+                    " (user_id,sid,ok,fail,streak,last_ok,last_fail,skip_until)"
+                    " VALUES(?,?,?,?,0,?,0,0)",
+                    (int(uid), sid, o + 1, f, now),
+                )
+            else:
+                streak += 1
+                back = HEALTH_BACKOFF[min(streak, len(HEALTH_BACKOFF) - 1)]
+                c.execute(
+                    "INSERT OR REPLACE INTO source_health"
+                    " (user_id,sid,ok,fail,streak,last_ok,last_fail,skip_until)"
+                    " VALUES(?,?,?,?,?,0,?,?)",
+                    (int(uid), sid, o, f + 1, streak, now, now + back),
+                )
+
+
+def health_report(uid):
+    """给书源页用：哪些源被自动跳过、什么时候重试。"""
+    now = time.time()
+    with conn() as c:
+        rows = [
+            dict(r)
+            for r in c.execute(
+                "SELECT h.sid,h.ok,h.fail,h.streak,h.last_ok,h.last_fail,h.skip_until,"
+                "COALESCE(s.name,'(已删除)') AS name"
+                " FROM source_health h LEFT JOIN sources s"
+                " ON s.user_id=h.user_id AND s.id=h.sid WHERE h.user_id=?"
+                " ORDER BY h.skip_until DESC, h.fail DESC",
+                (int(uid),),
+            )
+        ]
+    for r in rows:
+        r["dead"] = (r.get("skip_until") or 0) > now
+        r["retry_in"] = max(0, int((r.get("skip_until") or 0) - now))
+    return rows
+
+
+def reset_health(uid, only_dead=True):
+    """清掉冷却，让死源重新参与搜索（用户在书源页点「重试全部」时调）。"""
+    sql = "UPDATE source_health SET streak=0, skip_until=0 WHERE user_id=?"
+    if only_dead:
+        sql += " AND skip_until>?"
+    with conn() as c:
+        cur = c.execute(sql, (int(uid), time.time()) if only_dead else (int(uid),))
+        return cur.rowcount or 0
+
+
+def _prepare(uid, source_ids=None, include_dead=False):
+    srcs, skipped = [], 0
+    health = _health(uid)
+    now = time.time()
     for s in list_sources(uid, only_enabled=True):
         if source_ids and s["id"] not in source_ids:
             continue
+        h = health.get(s["id"]) or {}
+        if not include_dead and float(h.get("skip_until") or 0) > now:
+            skipped += 1
+            continue
         full = get_source(uid, s["id"])
         if full:
-            srcs.append(full["json"])
-    if limit:
-        srcs = srcs[:limit]
-    if not srcs:
-        return [], {"sources": 0, "ok": 0, "books": 0}
-    res = call({"cmd": "search", "key": key, "sources": srcs, "page": page}, timeout=timeout)
+            srcs.append({"id": s["id"], "name": s["name"], "json": full["json"]})
+    # 靠谱的源先跑：健康度好的排前面，流式结果能更快出东西
+    order = {s["id"]: i for i, s in enumerate(srcs)}
+    srcs.sort(key=lambda s: ((health.get(s["id"]) or {}).get("streak") or 0, order[s["id"]]))
+    return srcs, skipped
+
+
+def _one(src, key, page):
+    sid = src["id"]
+    try:
+        res = call({"cmd": "search", "key": key, "sources": [src["json"]], "page": page},
+                   timeout=SRC_TIMEOUT)
+        r = (res.get("results") or [{}])[0]
+    except subprocess.TimeoutExpired:
+        r = {"source": src["name"], "error": "超时 %.0fs" % SRC_TIMEOUT}
+    except Exception as e:
+        r = {"source": src["name"], "error": str(e)[:120]}
+    return {
+        "source": src["name"],
+        "sid": sid,
+        "error": r.get("error", ""),
+        "books": _rank_books(r.get("books") or [], key),
+    }
+
+
+def search_stream(uid, key, source_ids=None, page=1, include_dead=False):
+    """返回 (meta, 迭代器)。迭代器每 yield 一个源的结果，前端可以边搜边显示。"""
+    srcs, skipped = _prepare(uid, source_ids, include_dead)
+    meta = {"sources": len(srcs) + skipped, "skipped": skipped}
+
+    def gen():
+        if not srcs:
+            return
+        health = {}
+        acc = []
+        deadline = time.time() + SEARCH_BUDGET
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(CONC, len(srcs)))
+        futs = {ex.submit(_one, s, key, page): s for s in srcs}
+        pending = set(futs)
+        try:
+            while pending:
+                left = deadline - time.time()
+                if left <= 0:
+                    break
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=left,
+                    return_when=concurrent.futures.FIRST_COMPLETED)
+                for fut in done:
+                    s = futs[fut]
+                    try:
+                        r = fut.result()
+                    except Exception as e:
+                        r = {"source": s["name"], "sid": s["id"],
+                             "error": str(e)[:120], "books": []}
+                    health[s["id"]] = not r.get("error")
+                    acc.append(r)
+                    yield r
+        finally:
+            for fut in pending:
+                fut.cancel()
+            ex.shutdown(wait=False)
+            for s in srcs:  # 预算用尽被砍掉的也算一次失败，下次少浪费并发
+                health.setdefault(s["id"], False)
+            try:
+                _save_health(uid, health)
+            except Exception:
+                pass
+            # 流式搜索也回写缓存，网页搜完再用 App/非流式接口就是秒回
+            # （只搜了部分源时不写，避免把残缺结果当成全量缓存）
+            if not source_ids:
+                try:
+                    ok = sum(1 for r in acc if r["books"])
+                    cache_put(uid, key, page, include_dead, acc,
+                              {"sources": len(srcs) + skipped, "ok": ok,
+                               "books": sum(len(r["books"]) for r in acc),
+                               "skipped": skipped})
+                except Exception:
+                    pass
+
+    return meta, gen()
+
+
+def search(uid, key, source_ids=None, page=1, include_dead=False, refresh=False):
+    """并发搜索多个源；返回 (结果列表, 统计)。同关键词 10 分钟内直接吃缓存。"""
+    if not refresh and not source_ids:
+        hit = cache_get(uid, key, page, include_dead)
+        if hit:
+            return hit
+    meta, it = search_stream(uid, key, source_ids, page, include_dead)
     out, ok, total = [], 0, 0
-    for r in res.get("results", []):
-        books = r.get("books") or []
-        if books:
+    for r in it:
+        if r["books"]:
             ok += 1
-            total += len(books)
-        out.append(
-            {
-                "source": r.get("source"),
-                "error": r.get("error", ""),
-                "books": [
-                    {
-                        "name": b.get("name", ""),
-                        "author": b.get("author", ""),
-                        "kind": b.get("kind", ""),
-                        "intro": b.get("intro", ""),
-                        "cover": b.get("coverUrl") or b.get("cover", ""),
-                        "url": b.get("bookUrl") or b.get("url", ""),
-                        "lastChapter": b.get("lastChapter", ""),
-                    }
-                    for b in books
-                ],
-            }
-        )
+            total += len(r["books"])
+        out.append(r)
     out.sort(key=lambda x: (-len(x["books"]), x["source"]))
-    return out, {"sources": len(srcs), "ok": ok, "books": total}
+    stat = {"sources": meta["sources"], "ok": ok, "books": total,
+            "skipped": meta["skipped"], "cached": False}
+    if not source_ids:
+        cache_put(uid, key, page, include_dead, out, stat)
+    return out, stat
 
 
 # ---------------- 详情 / 目录 / 正文 ----------------

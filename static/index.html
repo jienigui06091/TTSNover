@@ -222,6 +222,11 @@
   </header>
   
   <div id="searchStat" class="hint pad status-pill"></div>
+  <div id="searchFilter" class="chip-row hide">
+    <button class="chip on" data-m="all">全部</button>
+    <button class="chip" data-m="name">书名命中</button>
+    <button class="chip" data-m="author">作者命中</button>
+  </div>
   <div id="searchRes" class="res-list"></div>
 </div>
 
@@ -269,6 +274,7 @@
         <span>多选</span>
       </button>
       <button class="btn ghost sm" id="btnSrcToggleAll" title="一键开启或停用所有源">启停全部</button>
+      <button class="btn ghost sm" id="btnSrcRetryDead" title="清掉失效源的冷却，让它们重新参与搜索">重试失效源</button>
       <button class="btn ghost sm" id="btnSrcExportOn" title="导出启用中的书源">
         <svg class="svg-icon"><use href="#icon-export"></use></svg>
         <span>导出启用</span>

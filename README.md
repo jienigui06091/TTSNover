@@ -22,7 +22,7 @@ FastAPI + 原生 JS（无构建步骤、无前端框架）。**多用户**：开
 | API Key | 每人自己的 Fish / 小米 key，AES-GCM 加密存 `user_keys`；接口只回 `has` + 掩码（`sk-****3f9a`），明文永不回前端 |
 | 限流 | 登录/注册 5 次/分钟/IP；TTS 120 次/分钟/用户；搜书全服同时 2 个任务，单任务最多 `SEARCH_CONC`（默认 10）个 node 子进程 |
 
-环境变量（`systemd` 里已配）：`WEBREADER_DATA`（数据目录，默认 `./data`）、`WEBREADER_DB`（单独指定库文件）、`AUTH_ENFORCE=1`、`SEARCH_CONC`、`SEARCH_MAX`、`TTS_PER_MIN`、`WEBREADER_MASTER_KEY`（base64 32 字节，优先于 `data/secret.key`）。
+环境变量（`systemd` 里已配）：`WEBREADER_DATA`（数据目录，默认 `./data`）、`WEBREADER_DB`（单独指定库文件）、`AUTH_ENFORCE=1`、`SEARCH_CONC`、`SEARCH_MAX`、`SEARCH_SRC_TIMEOUT`（单源超时，默认 6 秒）、`SEARCH_BUDGET`（整轮预算，默认 12 秒，到点带结果收工）、`SEARCH_CACHE_TTL`（同词缓存，默认 600 秒）、`TTS_PER_MIN`、`WEBREADER_MASTER_KEY`（base64 32 字节，优先于 `data/secret.key`）。
 
 ### 从单用户库升级
 
@@ -56,11 +56,12 @@ systemctl --user restart webreader
 1. **导入**：`源` → 右上「导入」→ 选 Legado 的 `shareBookSource.json`（数组或单个对象都行，重复导入按 URL+名称去重更新）
 2. **添加单个/链接**：`源` 顶部「添加」→ 粘贴一段书源 JSON，或填一个 json/txt 直链（由服务端下载，避开浏览器跨域）。同样按 URL+名称去重更新
 3. **删除**：每个源行尾「删除」→ 确认后从库里移除（要恢复得重新导入）；要批量清理点「多选」→ 勾选或「全选」（只选当前筛选结果）→「删除选中」
-4. **搜索**：🔍 → 输入书名回车。91 个源并发抓，命中的源按书数排序，每本可看详情/试读
+4. **搜索**：🔍 → 输入书名或作者回车。结果**边搜边出**（SSE 流式，通常 0.5 秒见第一批），源再多也不用干等；可按「全部 / 书名命中 / 作者命中」过滤，搜作者时命中的书会打上「作者命中」标签
 5. **加入书架**：详情页「加入书架」→ 自动存目录（几千章也只存标题+链接）→ 打开就是第一章，正文按需抓取并落库
 6. **启停**：每个源一个开关，关掉的不参与搜索（搜索更快）；「测试」用当前搜索框里的词单测这个源
 7. **体检**：`python3 tools/src_health.py` 用「剑来」「诡秘之主」测所有源，两个都搜不到就自动停用
-8. **导出**：`源` 顶部「导出启用」/「导出全部」→ 下载 `书源-启用-YYYYMMDD.json`（Legado 分享格式，可直接导入「阅读」App）。导出会带上库里的启用状态：`enabled` 反映当前开关，停用的源 `enabled:false`，`bookSourceGroup` 用库里的分组。命令行等价：`curl -OJ 'http://127.0.0.1:8848/api/sources/export?only=1'`
+8. **失效源自愈**：搜索会记每个源的成败，连续失败 2 次起自动冷却（2 分钟 → 5 分钟 → 15 分钟 → 1 小时），冷却中的源直接跳过，不再拖慢整轮；想立刻重试点「重试失效源」（`POST /api/sources/health/reset`），`GET /api/sources/health` 可看每个源的成败与剩余冷却
+9. **导出**：`源` 顶部「导出启用」/「导出全部」→ 下载 `书源-启用-YYYYMMDD.json`（Legado 分享格式，可直接导入「阅读」App）。导出会带上库里的启用状态：`enabled` 反映当前开关，停用的源 `enabled:false`，`bookSourceGroup` 用库里的分组。命令行等价：`curl -OJ 'http://127.0.0.1:8848/api/sources/export?only=1'`
 
 规则引擎在 `srce/`（Node，唯一外部依赖是 `cheerio`）：
 

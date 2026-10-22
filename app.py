@@ -21,7 +21,7 @@ import urllib.request
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -504,22 +504,102 @@ async def api_source_test(sid: str, request: Request):
 
 
 # ---------------- 书源搜书 / 详情 / 目录 / 正文 ----------------
+def _search_ids(sources_: str):
+    return [x for x in sources_.split(",") if x] if sources_ else None
+
+
 @app.get("/api/src/search")
 def api_src_search(request: Request, q: str = "", page: int = 1,
-                   sources_: str = Query("", alias="sources")):
+                   sources_: str = Query("", alias="sources"),
+                   include_dead: int = 0, refresh: int = 0):
     kw = (q or "").strip()
     if not kw:
         return jerr("缺少关键词")
-    ids = [x for x in sources_.split(",") if x] if sources_ else None
     if not SEARCH_SEM.acquire(blocking=False):
         return jerr("服务器正在处理别人的搜索，请等几秒再试", 429)
     try:
         t0 = time.time()
-        res, stat = sources.search(uid_of(request), kw, ids, page)
+        res, stat = sources.search(uid_of(request), kw, _search_ids(sources_), page,
+                                   bool(include_dead), bool(refresh))
         stat["ms"] = int((time.time() - t0) * 1000)
     finally:
         SEARCH_SEM.release()
     return {"key": kw, "results": res, "stats": stat}
+
+
+@app.get("/api/src/search/stream")
+def api_src_search_stream(request: Request, q: str = "", page: int = 1,
+                          sources_: str = Query("", alias="sources"),
+                          include_dead: int = 0):
+    """边搜边出：每搜完一个源就推一条 SSE，前端不用等最慢的源。"""
+    kw = (q or "").strip()
+    uid = uid_of(request)
+    ids = _search_ids(sources_)
+
+    def sse(obj):
+        return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+    def gen():
+        if not kw:
+            yield sse({"type": "error", "error": "缺少关键词"})
+            return
+        if not SEARCH_SEM.acquire(blocking=False):
+            yield sse({"type": "error", "error": "服务器正在处理别人的搜索，请等几秒再试",
+                       "code": 429})
+            return
+        t0 = time.time()
+        try:
+            # 同关键词刚搜过：直接重放缓存，前端秒出
+            if not ids:
+                hit = sources.cache_get(uid, kw, page, bool(include_dead))
+                if hit:
+                    results, stat = hit
+                    yield sse({"type": "meta", "key": kw, "sources": stat.get("sources", 0),
+                               "skipped": stat.get("skipped", 0)})
+                    for i, r in enumerate(results, 1):
+                        rr = dict(r)
+                        rr["type"] = "source"
+                        rr["done"] = i
+                        yield sse(rr)
+                    stat["ms"] = 0
+                    yield sse({"type": "done", "stats": stat})
+                    return
+            meta, it = sources.search_stream(uid, kw, ids, page, bool(include_dead))
+            yield sse({"type": "meta", "key": kw, "sources": meta["sources"],
+                       "skipped": meta["skipped"]})
+            ok = books = done = 0
+            for r in it:
+                done += 1
+                if r.get("books"):
+                    ok += 1
+                    books += len(r["books"])
+                r["type"] = "source"
+                r["done"] = done
+                yield sse(r)
+            yield sse({"type": "done",
+                       "stats": {"sources": meta["sources"], "ok": ok, "books": books,
+                                 "skipped": meta["skipped"], "cached": False,
+                                 "ms": int((time.time() - t0) * 1000)}})
+        except Exception as e:  # 客户端断开也会走到这里，别把异常抛给日志
+            yield sse({"type": "error", "error": str(e)[:200]})
+        finally:
+            SEARCH_SEM.release()
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/sources/health")
+def api_sources_health(request: Request):
+    """哪些书源连续失败被自动跳过、还有多久重试。"""
+    return {"sources": sources.health_report(uid_of(request))}
+
+
+@app.post("/api/sources/health/reset")
+def api_sources_health_reset(request: Request):
+    n = sources.reset_health(uid_of(request))
+    return {"ok": True, "reset": n}
 
 
 @app.get("/api/src/info")

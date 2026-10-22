@@ -210,4 +210,4 @@ sudo systemctl restart webreader
 | 429 | 同 IP 5 次/分限流，等一分钟；`auth.rate_ok` 是进程内计数，重启清零 |
 | TTS 报网络错误 | 云服务器出网被拦（安全组/NAT），`curl -sI https://api.fish.audio` 验证 |
 | 502 | 后端没起来：`journalctl -u webreader -n 50`；常见是 `WEBREADER_DATA` 权限或 venv 路径不对 |
-| 内存飙高 | 并发搜书太多：降 `SEARCH_CONC` / `SEARCH_MAX`，或加 swap |
+| 内存飙高 | 搜书每个源一个 node 子进程（实测峰值约 78 MB），`SEARCH_CONC=10` 最坏约 780 MB。2 GB 机器降到 `SEARCH_CONC=6`，或把 `SEARCH_BUDGET` 收紧到 8 秒。另外别频繁点「重试失效源」——失效源留在冷却里（连续失败 2 次自动跳过）时，一轮要跑的源数会明显更少 |

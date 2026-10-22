@@ -68,10 +68,15 @@
 
 | 用途 | 请求 | 备注 |
 | --- | --- | --- |
-| 多源搜书 | `GET /api/src/search?q=&page=` | 全服 2 个搜索任务、每用户 1 个；**429 要退避重试**；单次可能十几秒，要做 loading + 取消 |
+| 多源搜书 | `GET /api/src/search?q=&page=&include_dead=0&refresh=0` | 全服 2 个搜索任务、每用户 1 个；**429 要退避重试**；返回 `{key, results:[{source,sid,error,books[]}], stats:{sources,ok,books,skipped,cached,ms}}`；单次最多约 12 秒（服务端预算），做 loading + 取消 |
+| 流式搜书 | `GET /api/src/search/stream?q=&page=` | `text/event-stream`，每行 `data: {...}`，`type` 依次为 `meta` → 多个 `source` → `done`（出错为 `error`）。浏览器 `EventSource` 不能带 `Authorization` 头，App 用上面的普通接口即可 |
+| 失效源健康度 | `GET /api/sources/health` | 每源 `ok/fail/streak/skip_until`，`cooling=true` 表示正在冷却、不参与搜索 |
+| 恢复失效源 | `POST /api/sources/health/reset` | 清掉全部冷却，下次搜索重新尝试 |
 | 加入书架 | `POST /api/src/add` | 用搜索结果里的源 + 书 id |
 | 书源列表 | `GET /api/sources` | 每用户独立 |
 | 导入/导出 | `POST /api/sources/import` / `GET /api/sources/export?only=0` | 直接吃网页版导出的 JSON |
+
+搜索结果里每本书带 `matched` 字段：`name`（书名命中）、`author`（作者命中）、空串（站点返回的模糊结果）。搜作者时建议只展示 `matched=author` 的书，或把它排在前面。
 
 ## 6. 朗读（TTS）
 

@@ -245,14 +245,17 @@ function renderShelfGrid(books) {
   }
 }
 
-/* 过滤书架 */
+/* 过滤书架：书名 / 作者 / 书源名都能搜到 */
 function filterShelf(kw) {
   kw = (kw || '').trim().toLowerCase();
   if (!kw) {
     renderShelfGrid(shelfBooksList);
     return;
   }
-  const filtered = shelfBooksList.filter((b) => (b.title || '').toLowerCase().includes(kw));
+  const filtered = shelfBooksList.filter((b) =>
+    (b.title || '').toLowerCase().includes(kw) ||
+    (b.author || '').toLowerCase().includes(kw) ||
+    (b.src_name || '').toLowerCase().includes(kw));
   renderShelfGrid(filtered);
 }
 
@@ -1181,43 +1184,193 @@ async function loadSourceIndex(force) {
   return srcIndex;
 }
 
-async function doSearch() {
-  const kw = $('#searchInput').value.trim();
-  if (!kw) return;
+/* 搜索：SSE 边搜边出 + 书名/作者命中过滤 */
+let searchES = null;
+let searchState = null;
+
+function stopSearch() {
+  if (searchES) { try { searchES.close(); } catch (e) { } searchES = null; }
+}
+
+function searchStatText() {
+  const s = searchState;
+  if (!s) return '';
+  const parts = [];
+  if (!s.finished) {
+    parts.push(`已搜 ${s.done}/${s.total || '?'} 源`);
+  } else {
+    parts.push(`已搜 ${s.done} 源`);
+    if (s.total > s.done) parts.push(`${s.total - s.done} 个超时未返回`);
+  }
+  parts.push(`命中 ${s.ok} 源`, `${s.books} 本`);
+  if (s.skipped) parts.push(`跳过 ${s.skipped} 个失效源`);
+  if (s.cached) parts.push('缓存');
+  if (s.ms) parts.push(`${(s.ms / 1000).toFixed(1)}s`);
+  return '⚡ ' + parts.join(' · ');
+}
+
+function updateSearchStat(extra) {
+  const el = $('#searchStat');
+  if (el) el.textContent = searchStatText() + (extra ? ' · ' + extra : '');
+}
+
+function searchBookNode(g, b) {
+  const it = document.createElement('div');
+  it.className = 'res-item';
+  const cover = b.cover
+    ? `<img class="thumb" src="${escapeHtml(b.cover)}" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'thumb',textContent:'无封面'}))">`
+    : '<div class="thumb">无封面</div>';
+  const tag = b.matched === 'author' ? '<span class="hit-tag">作者命中</span>' : '';
+  it.innerHTML = cover + `<div class="info"><div class="t">${escapeHtml(b.name)}${tag}</div>
+    <div class="m">${escapeHtml([b.author, b.kind, b.lastChapter].filter(Boolean).join(' · '))}</div></div>`;
+  it.onclick = () => openDetail(g.source, b);
+  return it;
+}
+
+function searchGroupNode(g) {
+  const books = searchFilterBooks(g);
+  if (!books.length) return null;
+  const h = document.createElement('div');
+  h.className = 'res-group';
+  h.innerHTML = `<b>${escapeHtml(g.source)}</b> <span>${books.length} 本</span>`;
+  h.__src = g.source;
+  for (const b of books.slice(0, 12)) h.appendChild(searchBookNode(g, b));
+  return h;
+}
+
+function searchFilterBooks(g) {
+  const f = (searchState && searchState.filter) || 'all';
+  const books = g.books || [];
+  if (f === 'all') return books;
+  return books.filter((b) => b.matched === f);
+}
+
+function appendSearchGroup(g) {
   const box = $('#searchRes');
-  box.innerHTML = '<p class="hint" style="padding:18px">正在并发检索各路书源，请稍候…</p>';
-  $('#searchStat').textContent = '';
+  const node = searchGroupNode(g);
+  if (!box || !node) return;
+  const ph = box.querySelector('.hint');
+  if (ph) box.innerHTML = '';
+  box.appendChild(node);
+}
+
+function renderSearchResults() {
+  const box = $('#searchRes');
+  if (!box || !searchState) return;
+  box.innerHTML = '';
+  const f = searchState.filter || 'all';
+  let shown = 0;
+  for (const g of searchState.groups) {
+    const node = searchGroupNode(g);
+    if (node) { box.appendChild(node); shown++; }
+  }
+  if (!shown) {
+    const tip = !searchState.finished ? '正在检索…'
+      : (f === 'author' ? '没有作者命中的书，试试切到「全部」或换关键词。'
+        : f === 'name' ? '没有书名命中的书，试试切到「全部」或换关键词。'
+          : '未检索到相关书籍。可尝试更换关键词，或在「书源」中检查可用书源。');
+    box.innerHTML = `<p class="hint" style="padding:18px">${tip}</p>`;
+  }
+  const fr = $('#searchFilter');
+  if (fr) {
+    fr.classList.toggle('hide', !searchState.groups.length);
+    for (const b of fr.querySelectorAll('.chip')) b.classList.toggle('on', b.dataset.m === f);
+  }
+}
+
+function setSearchFilter(f) {
+  if (!searchState) return;
+  searchState.filter = f;
+  renderSearchResults();
+  updateSearchStat();
+}
+
+function onSourceResult(m) {
+  const s = searchState;
+  if (!s) return;
+  s.done++;
+  const books = m.books || [];
+  if (books.length) { s.ok++; s.books += books.length; }
+  const g = { source: m.source, error: m.error || '', books };
+  s.groups.push(g);
+  if (books.length && (s.filter || 'all') === 'all') appendSearchGroup(g);
+  updateSearchStat();
+  const fr = $('#searchFilter');
+  if (fr && s.groups.length) fr.classList.remove('hide');
+}
+
+function finishSearch(err) {
+  const s = searchState;
+  if (!s) return;
+  s.finished = true;
+  stopSearch();
+  // 流式已按顺序追加过，收尾只补空状态，避免把用户滚动位置顶回顶部
+  const box = $('#searchRes');
+  const hasShown = box && box.querySelector('.res-group');
+  if (!hasShown) renderSearchResults();
+  updateSearchStat(err ? '中断：' + err : '');
+}
+
+function startSearchStream(kw) {
+  let got = false;
+  const es = new EventSource('/api/src/search/stream?q=' + encodeURIComponent(kw));
+  searchES = es;
+  es.onmessage = (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.type === 'meta') {
+      searchState.total = m.sources || 0;
+      searchState.skipped = m.skipped || 0;
+      updateSearchStat();
+    } else if (m.type === 'source') {
+      got = true;
+      onSourceResult(m);
+    } else if (m.type === 'done') {
+      const st = m.stats || {};
+      Object.assign(searchState, { ok: st.ok || 0, books: st.books || 0, ms: st.ms || 0, cached: !!st.cached });
+      finishSearch();
+    } else if (m.type === 'error') {
+      stopSearch();
+      if (!got) doSearchFallback(kw); else finishSearch(m.error);
+    }
+  };
+  es.onerror = () => {
+    if (!searchState || searchState.finished) { stopSearch(); return; }
+    stopSearch();
+    if (!got) doSearchFallback(kw); else finishSearch();
+  };
+}
+
+async function doSearchFallback(kw) {
+  if (!searchState || searchState.kw !== kw) return;
   try {
     const r = await api('/api/src/search?q=' + encodeURIComponent(kw));
     const st = r.stats || {};
-    $('#searchStat').textContent =
-      `⚡ 命中 ${st.ok}/${st.sources} 个源 · 发现 ${st.books} 本 · 耗时 ${((st.ms || 0) / 1000).toFixed(1)}s`;
-    box.innerHTML = '';
-    const groups = (r.results || []).filter((g) => g.books.length);
-    if (!groups.length) {
-      box.innerHTML = '<p class="hint" style="padding:18px">未检索到相关书籍。可尝试更换关键词，或在「书源」中检查可用书源。</p>';
-      return;
-    }
-    for (const g of groups) {
-      const h = document.createElement('div');
-      h.className = 'res-group';
-      h.innerHTML = `<b>${escapeHtml(g.source)}</b> <span>${g.books.length} 本</span>`;
-      box.appendChild(h);
-      for (const b of g.books.slice(0, 12)) {
-        const it = document.createElement('div');
-        it.className = 'res-item';
-        const cover = b.cover
-          ? `<img class="thumb" src="${escapeHtml(b.cover)}" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'thumb',textContent:'无封面'}))">`
-          : '<div class="thumb">无封面</div>';
-        it.innerHTML = cover + `<div class="info"><div class="t">${escapeHtml(b.name)}</div>
-          <div class="m">${escapeHtml([b.author, b.kind, b.lastChapter].filter(Boolean).join(' · '))}</div></div>`;
-        it.onclick = () => openDetail(g.source, b);
-        box.appendChild(it);
-      }
-    }
+    Object.assign(searchState, {
+      groups: (r.results || []).filter((g) => (g.books || []).length),
+      ok: st.ok || 0, books: st.books || 0, total: st.sources || 0,
+      skipped: st.skipped || 0, cached: !!st.cached, ms: st.ms || 0, done: st.sources || 0,
+    });
+    finishSearch();
   } catch (e) {
-    box.innerHTML = `<p class="hint" style="padding:18px;color:var(--err)">搜索失败：${escapeHtml(e.message)}</p>`;
+    finishSearch(e.message);
   }
+}
+
+async function doSearch() {
+  const kw = $('#searchInput').value.trim();
+  if (!kw) return;
+  stopSearch();
+  const box = $('#searchRes');
+  box.innerHTML = '<p class="hint" style="padding:18px">正在并发检索各路书源，结果会边搜边出…</p>';
+  const prevFilter = 'all';
+  searchState = { kw, groups: [], done: 0, total: 0, ok: 0, books: 0, skipped: 0,
+                  filter: prevFilter, finished: false, ms: 0, cached: false };
+  const fr = $('#searchFilter');
+  if (fr) fr.classList.add('hide');
+  updateSearchStat();
+  if (window.EventSource) startSearchStream(kw);
+  else await doSearchFallback(kw);
 }
 
 async function openDetail(sourceName, b) {
@@ -1661,6 +1814,13 @@ function bind() {
     searchClear.onclick = () => { searchInput.value = ''; searchClear.classList.add('hide'); searchInput.focus(); };
   }
 
+  const sf = $('#searchFilter');
+  if (sf) {
+    for (const chip of sf.querySelectorAll('.chip')) {
+      chip.onclick = () => setSearchFilter(chip.dataset.m || 'all');
+    }
+  }
+
   $('#btnDetailBack').onclick = () => showView('discover');
   $('#btnSources').onclick = openSources;
   $('#btnSrcBack').onclick = () => showView('shelf');
@@ -1686,6 +1846,18 @@ function bind() {
       }
       renderSourcesList(sourcesList);
       toast('批量设置完成', 'ok');
+    };
+  }
+
+  const srcRetryDead = $('#btnSrcRetryDead');
+  if (srcRetryDead) {
+    srcRetryDead.onclick = async () => {
+      try {
+        const r = await api('/api/sources/health/reset', { method: 'POST' });
+        toast(`已恢复 ${r.reset || 0} 个失效书源，下次搜索会重新尝试`, 'ok');
+      } catch (e) {
+        toast('恢复失败：' + e.message);
+      }
     };
   }
 
