@@ -81,11 +81,14 @@ def setup():
     _dst.close()
     _src.close()
     c = sqlite3.connect(db)
-    for t in ("tokens", "user_keys", "users", "settings", "sources"):
-        c.execute("DELETE FROM %s WHERE user_id=0" % t if t in ("settings", "sources")
-                  else "DELETE FROM %s" % t)
-    for t in ("books", "sources", "settings"):
+    for t in ("tokens", "user_keys", "users"):
+        c.execute("DELETE FROM %s" % t)
+    # settings/sources 是复合主键 (user_id, id)，用 OR REPLACE 让冲突的旧 user_id=0 行让位；
+    # 不能先 DELETE user_id=0 —— 线上库重置后本来就全是 0，会把自己删空。
+    for t in ("books",):
         c.execute("UPDATE %s SET user_id=0" % t)
+    for t in ("sources", "settings"):
+        c.execute("UPDATE OR REPLACE %s SET user_id=0" % t)
     c.commit()
     c.close()
     bins = []
