@@ -160,7 +160,8 @@ def toggle_source(sid, enabled=None):
 
 def delete_source(sid):
     with conn() as c:
-        c.execute("DELETE FROM sources WHERE id=?", (sid,))
+        cur = c.execute("DELETE FROM sources WHERE id=?", (sid,))
+        return cur.rowcount or 0
 
 
 def call(job, timeout=120):

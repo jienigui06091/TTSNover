@@ -217,7 +217,10 @@
         <svg class="svg-icon"><use href="#icon-plus"></use></svg>
         <span>添加</span>
       </button>
-      <button class="btn ghost sm" id="btnSrcToggleAll" title="一键开启或停用所有源">全选/反选</button>
+      <button class="btn ghost sm" id="btnSrcMulti" title="多选书源，批量删除">
+        <span>多选</span>
+      </button>
+      <button class="btn ghost sm" id="btnSrcToggleAll" title="一键开启或停用所有源">启停全部</button>
       <button class="btn ghost sm" id="btnSrcExportOn" title="导出启用中的书源">
         <svg class="svg-icon"><use href="#icon-export"></use></svg>
         <span>导出启用</span>
@@ -226,6 +229,16 @@
     </div>
   </div>
   
+  <div id="srcBulkBar" class="src-bulkbar glass hide">
+    <span id="srcBulkInfo" class="hint">已选 0 个</span>
+    <div class="src-bulk-actions">
+      <button class="btn ghost sm" id="btnSrcSelAll" title="选中当前筛选结果里的全部书源">全选</button>
+      <button class="btn ghost sm" id="btnSrcSelNone">清空</button>
+      <button class="btn danger sm" id="btnSrcDelSel">删除选中</button>
+      <button class="btn ghost sm" id="btnSrcMultiExit">退出</button>
+    </div>
+  </div>
+
   <div id="srcList" class="src-list"></div>
 </div>
 

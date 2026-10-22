@@ -45,6 +45,9 @@ let mimoModes = [], mimoClones = [], mimoDesignDefault = '', mimoCloneMax = 7 * 
 let saveTimer = null;
 let shelfBooksList = [];    // 书架本地缓存列表，用于即时搜索过滤
 let sourcesList = [];       // 书源列表缓存
+let srcMulti = false;       // 多选模式（批量删除）
+const srcSel = new Set();   // 多选模式下已选中的书源 id
+let curSrcList = [];        // 当前渲染出来的列表（受筛选影响）
 
 /* ---------------- 基础工具函数 ---------------- */
 async function api(path, opts = {}) {
@@ -1275,6 +1278,7 @@ async function openSources() {
 function renderSourcesList(list) {
   const box = $('#srcList');
   box.innerHTML = '';
+  curSrcList = list;
   const enabledCount = list.filter((s) => s.enabled).length;
   $('#srcStat').textContent = `共 ${list.length} 个书源 (已启用 ${enabledCount} 个)`;
 
@@ -1282,16 +1286,28 @@ function renderSourcesList(list) {
   for (const s of list) {
     srcIndex[s.name] = s.id;
     const row = document.createElement('div');
-    row.className = 'src-row';
+    row.className = 'src-row' + (srcMulti ? ' multi' : '') + (srcSel.has(s.id) ? ' picked' : '');
     row.innerHTML = `
+      ${srcMulti ? `<button class="src-check ${srcSel.has(s.id) ? 'on' : ''}" title="选中"></button>` : ''}
       <button class="sw ${s.enabled ? 'on' : ''}" title="点击启用/停用此书源"></button>
       <div class="n">
         <b>${escapeHtml(s.name)}</b>
         <span>${escapeHtml((s.url || '').replace(/^https?:\/\//, '').slice(0, 42))}</span>
       </div>
-      <button class="mini" title="单源并发测试">测试</button>
-      <button class="mini danger" title="删除此书源">删除</button>`;
-      
+      ${srcMulti ? '' : '<button class="mini" title="单源并发测试">测试</button><button class="mini danger" title="删除此书源">删除</button>'}`;
+
+    if (srcMulti) {
+      row.onclick = (ev) => {
+        if (ev.target.closest('.sw')) return;
+        if (srcSel.has(s.id)) srcSel.delete(s.id);
+        else srcSel.add(s.id);
+        row.classList.toggle('picked', srcSel.has(s.id));
+        const ck = row.querySelector('.src-check');
+        if (ck) ck.classList.toggle('on', srcSel.has(s.id));
+        updateBulkBar();
+      };
+    }
+
     row.querySelector('.sw').onclick = async (ev) => {
       const b = ev.currentTarget;
       try {
@@ -1305,7 +1321,8 @@ function renderSourcesList(list) {
       }
     };
 
-    row.querySelector('.mini').onclick = async (ev) => {
+    const testBtn = row.querySelector('.mini:not(.danger)');
+    if (testBtn) testBtn.onclick = async (ev) => {
       const b = ev.currentTarget;
       b.disabled = true; b.textContent = '测试中…';
       try {
@@ -1324,7 +1341,8 @@ function renderSourcesList(list) {
       setTimeout(() => { b.disabled = false; b.textContent = '测试'; }, 2500);
     };
 
-    row.querySelector('.mini.danger').onclick = () => {
+    const delBtn = row.querySelector('.mini.danger');
+    if (delBtn) delBtn.onclick = () => {
       showConfirm({
         title: '删除书源',
         msg: `确定删除「${s.name}」吗？删掉后要重新导入才能恢复。`,
@@ -1333,7 +1351,9 @@ function renderSourcesList(list) {
           try {
             await api(`/api/sources/${s.id}`, { method: 'DELETE' });
             sourcesList = sourcesList.filter((x) => x.id !== s.id);
-            renderSourcesList(sourcesList);
+            srcSel.delete(s.id);
+            filterSources($('#srcFilter').value);
+            updateBulkBar();
             toast(`已删除「${s.name}」`, 'ok');
           } catch (e) {
             toast('删除失败：' + e.message, 'err', 4000);
@@ -1343,6 +1363,56 @@ function renderSourcesList(list) {
     };
     box.appendChild(row);
   }
+}
+
+/* ---------------- 书源多选 / 批量删除 ---------------- */
+function setSrcMulti(on) {
+  srcMulti = on;
+  srcSel.clear();
+  const btn = $('#btnSrcMulti');
+  btn.classList.toggle('primary', on);
+  btn.classList.toggle('ghost', !on);
+  btn.querySelector('span').textContent = on ? '完成' : '多选';
+  $('#srcBulkBar').classList.toggle('hide', !on);
+  filterSources($('#srcFilter').value);
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  if (!srcMulti) return;
+  const n = srcSel.size;
+  $('#srcBulkInfo').textContent = `已选 ${n} 个${n ? ' · 共 ' + curSrcList.length + ' 个可见' : ''}`;
+  $('#btnSrcDelSel').disabled = n === 0;
+}
+
+function deleteSelectedSources() {
+  const ids = [...srcSel];
+  if (!ids.length) return;
+  const sample = curSrcList.filter((s) => srcSel.has(s.id)).slice(0, 3).map((s) => s.name).join('、');
+  showConfirm({
+    title: `删除 ${ids.length} 个书源`,
+    msg: `将删除：${sample}${ids.length > 3 ? ` 等 ${ids.length} 个` : ''}。删掉后要重新导入才能恢复。`,
+    okText: '删除',
+    onOk: async () => {
+      let done = 0;
+      try {
+        const r = await api('/api/sources/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        });
+        done = r.deleted || 0;
+      } catch (e) {
+        toast('批量删除失败：' + e.message, 'err', 4000);
+        return;
+      }
+      sourcesList = sourcesList.filter((x) => !srcSel.has(x.id));
+      srcSel.clear();
+      filterSources($('#srcFilter').value);
+      updateBulkBar();
+      toast(`已删除 ${done} 个书源`, 'ok', 3000);
+    },
+  });
 }
 
 function filterSources(kw) {
@@ -1476,6 +1546,19 @@ function bind() {
   $('#btnSrcAddClose').onclick = closeSrcAdd;
   $('#btnSrcAddCancel').onclick = closeSrcAdd;
   $('#btnSrcAddSave').onclick = submitSrcAdd;
+  $('#btnSrcMulti').onclick = () => setSrcMulti(!srcMulti);
+  $('#btnSrcMultiExit').onclick = () => setSrcMulti(false);
+  $('#btnSrcSelAll').onclick = () => {
+    curSrcList.forEach((s) => srcSel.add(s.id));
+    filterSources($('#srcFilter').value);
+    updateBulkBar();
+  };
+  $('#btnSrcSelNone').onclick = () => {
+    srcSel.clear();
+    filterSources($('#srcFilter').value);
+    updateBulkBar();
+  };
+  $('#btnSrcDelSel').onclick = deleteSelectedSources;
   $('#btnDiscover').onclick = () => { showView('discover'); $('#searchInput').focus(); };
   $('#btnDiscBack').onclick = () => showView('shelf');
   $('#btnDoSearch').onclick = doSearch;

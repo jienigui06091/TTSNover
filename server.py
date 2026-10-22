@@ -197,6 +197,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self.err("不是合法的书源 JSON：%s" % e)
                 return self.send_json({"ok": True, "added": added, "updated": updated,
                                        "total": len(sources.list_sources())})
+            if p == "/api/sources/delete":
+                d = jbody(self)
+                ids = d.get("ids") or []
+                if not isinstance(ids, list) or not ids:
+                    return self.err("没有选中任何书源")
+                n = 0
+                for sid in ids:
+                    try:
+                        n += sources.delete_source(str(sid))
+                    except Exception:
+                        traceback.print_exc()
+                return self.send_json({"ok": True, "deleted": n})
             if p == "/api/sources/fetch":
                 d = jbody(self)
                 url = (d.get("url") or "").strip()
