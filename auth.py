@@ -17,8 +17,10 @@ import threading
 import time
 from collections import deque
 
+import paths
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-DB = os.environ.get("WEBREADER_DB") or os.path.join(HERE, "data", "reader.db")
+DB = paths.DB
 
 COOKIE_NAME = "wr_token"
 TOKEN_TTL = 30 * 24 * 3600          # 30 天

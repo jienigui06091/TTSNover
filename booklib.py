@@ -9,8 +9,10 @@ import time
 import zipfile
 from html.parser import HTMLParser
 
+import paths
+
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-DB_PATH = os.environ.get("WEBREADER_DB") or os.path.join(DATA, "reader.db")
+DB_PATH = paths.DB
 
 # ---------- 章节识别 ----------
 CN_NUM = "0-9零一二三四五六七八九十百千万两〇"
@@ -201,22 +203,28 @@ def parse_epub(raw: bytes):
     return title or "未命名", author, chapters
 
 
-# ---------- DB ----------
+# ---------- DB（所有读写都带 user_id，漏一个就是跨用户泄漏） ----------
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS books(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL DEFAULT 0,
   title TEXT NOT NULL, author TEXT DEFAULT '',
   fmt TEXT DEFAULT 'txt', chars INTEGER DEFAULT 0,
   created REAL, opened REAL, progress_ch REAL DEFAULT 0, progress_off REAL DEFAULT 0,
-  seed INTEGER DEFAULT 0
+  seed INTEGER DEFAULT 0,
+  cover TEXT DEFAULT '', src_id TEXT DEFAULT '', src_name TEXT DEFAULT '', src_url TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS chapters(
   book_id INTEGER NOT NULL, idx INTEGER NOT NULL,
-  title TEXT, content TEXT,
+  title TEXT, content TEXT, url TEXT DEFAULT '', fetched INTEGER DEFAULT 1,
   PRIMARY KEY(book_id, idx)
 );
-CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS settings(
+  user_id INTEGER NOT NULL DEFAULT 0, k TEXT NOT NULL, v TEXT,
+  PRIMARY KEY(user_id, k)
+);
 CREATE INDEX IF NOT EXISTS ix_ch ON chapters(book_id);
+CREATE INDEX IF NOT EXISTS ix_books_user ON books(user_id, opened DESC);
 """
 
 
@@ -228,18 +236,39 @@ def conn():
     return c
 
 
+def _cols(c, table):
+    return {r["name"] for r in c.execute("PRAGMA table_info(%s)" % table)}
+
+
 def init_db():
+    """建表 + 老库增量加列（幂等）。"""
     with conn() as c:
         c.executescript(SCHEMA)
+        have = _cols(c, "books")
+        for col, ddl in (
+            ("user_id", "INTEGER NOT NULL DEFAULT 0"),
+            ("cover", "TEXT DEFAULT ''"),
+            ("src_id", "TEXT DEFAULT ''"),
+            ("src_name", "TEXT DEFAULT ''"),
+            ("src_url", "TEXT DEFAULT ''"),
+        ):
+            if col not in have:
+                c.execute("ALTER TABLE books ADD COLUMN %s %s" % (col, ddl))
+        if "user_id" not in _cols(c, "settings"):
+            c.execute("ALTER TABLE settings RENAME TO settings_old")
+            c.execute("CREATE TABLE settings(user_id INTEGER NOT NULL DEFAULT 0,"
+                      " k TEXT NOT NULL, v TEXT, PRIMARY KEY(user_id, k))")
+            c.execute("INSERT INTO settings(user_id, k, v) SELECT 0, k, v FROM settings_old")
+            c.execute("DROP TABLE settings_old")
 
 
-def add_book(title, author, fmt, chapters):
+def add_book(uid, title, author, fmt, chapters):
     total = sum(len(b) for _, b in chapters)
     now = time.time()
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO books(title,author,fmt,chars,created,opened,seed) VALUES(?,?,?,?,?,?,?)",
-            (title, author or "", fmt, total, now, now, abs(hash(title)) % 997),
+            "INSERT INTO books(user_id,title,author,fmt,chars,created,opened,seed) VALUES(?,?,?,?,?,?,?,?)",
+            (int(uid), title, author or "", fmt, total, now, now, abs(hash(title)) % 997),
         )
         bid = cur.lastrowid
         c.executemany(
@@ -249,18 +278,19 @@ def add_book(title, author, fmt, chapters):
     return bid
 
 
-def list_books():
+def list_books(uid):
     with conn() as c:
         rows = c.execute(
             """SELECT b.*, (SELECT COUNT(*) FROM chapters WHERE book_id=b.id) AS ch_count
-               FROM books b ORDER BY opened DESC"""
+               FROM books b WHERE b.user_id=? ORDER BY b.opened DESC""",
+            (int(uid),),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_book(bid):
+def get_book(uid, bid):
     with conn() as c:
-        r = c.execute("SELECT * FROM books WHERE id=?", (bid,)).fetchone()
+        r = c.execute("SELECT * FROM books WHERE id=? AND user_id=?", (bid, int(uid))).fetchone()
         if not r:
             return None
         d = dict(r)
@@ -273,37 +303,44 @@ def get_book(bid):
     return d
 
 
-def get_chapter(bid, idx):
+def get_chapter(uid, bid, idx):
     with conn() as c:
         r = c.execute(
-            "SELECT title,content FROM chapters WHERE book_id=? AND idx=?", (bid, idx)
+            "SELECT ch.title,ch.content FROM chapters ch JOIN books b ON b.id=ch.book_id"
+            " WHERE ch.book_id=? AND ch.idx=? AND b.user_id=?",
+            (bid, idx, int(uid)),
         ).fetchone()
+        if not r:
+            return None
         n = c.execute("SELECT COUNT(*) FROM chapters WHERE book_id=?", (bid,)).fetchone()[0]
-        c.execute("UPDATE books SET opened=? WHERE id=?", (time.time(), bid))
-    if not r:
-        return None
+        c.execute("UPDATE books SET opened=? WHERE id=? AND user_id=?", (time.time(), bid, int(uid)))
     paras = [p.strip() for p in r["content"].split("\n") if p.strip()]
     return {"idx": idx, "title": r["title"], "paras": paras, "count": n}
 
 
-def set_progress(bid, ch, off):
+def set_progress(uid, bid, ch, off):
     with conn() as c:
         c.execute(
-            "UPDATE books SET progress_ch=?,progress_off=?,opened=? WHERE id=?",
-            (int(ch), float(off), time.time(), bid),
+            "UPDATE books SET progress_ch=?,progress_off=?,opened=? WHERE id=? AND user_id=?",
+            (int(ch), float(off), time.time(), bid, int(uid)),
         )
 
 
-def delete_book(bid):
+def delete_book(uid, bid):
     with conn() as c:
-        c.execute("DELETE FROM chapters WHERE book_id=?", (bid,))
-        c.execute("DELETE FROM books WHERE id=?", (bid,))
+        cur = c.execute("DELETE FROM books WHERE id=? AND user_id=?", (bid, int(uid)))
+        if cur.rowcount:
+            c.execute("DELETE FROM chapters WHERE book_id=?", (bid,))
+        return cur.rowcount or 0
 
 
-def search(bid, kw, limit=40):
+def search(uid, bid, kw, limit=40):
     like = f"%{kw}%"
     out = []
     with conn() as c:
+        own = c.execute("SELECT 1 FROM books WHERE id=? AND user_id=?", (bid, int(uid))).fetchone()
+        if not own:
+            return out
         for r in c.execute(
             "SELECT idx,title,content FROM chapters WHERE book_id=? AND content LIKE ? ORDER BY idx LIMIT ?",
             (bid, like, limit),
@@ -317,15 +354,16 @@ def search(bid, kw, limit=40):
     return out
 
 
-def get_settings():
+def get_settings(uid):
     with conn() as c:
-        r = c.execute("SELECT v FROM settings WHERE k='main'").fetchone()
+        r = c.execute("SELECT v FROM settings WHERE user_id=? AND k='main'", (int(uid),)).fetchone()
     return json.loads(r["v"]) if r else {}
 
 
-def put_settings(obj):
+def put_settings(uid, obj):
     with conn() as c:
         c.execute(
-            "INSERT INTO settings(k,v) VALUES('main',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-            (json.dumps(obj, ensure_ascii=False),),
+            "INSERT INTO settings(user_id,k,v) VALUES(?,'main',?)"
+            " ON CONFLICT(user_id,k) DO UPDATE SET v=excluded.v",
+            (int(uid), json.dumps(obj, ensure_ascii=False)),
         )

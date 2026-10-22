@@ -2,33 +2,37 @@
 # -*- coding: utf-8 -*-
 """书源（Legado bookSource）支持：导入 / 管理 / 调用 Node 规则引擎 / 加入书架
 
-数据表
-  sources(id, name, url, grp, enabled, raw, added)
+数据表（书源按用户隔离：同一书源可被不同用户各自导入，主键 (user_id,id)）
+  sources(user_id, id, name, url, grp, enabled, raw, added)
   books 追加：cover, src_id, src_name, src_url
   chapters 追加：url, fetched（0=只有链接，正文按需抓取）
 """
 import hashlib
 import json
 import os
+
+import paths
 import sqlite3
 import subprocess
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DB = os.environ.get("WEBREADER_DB") or os.path.join(HERE, "data", "reader.db")
+DB = paths.DB
 CLI = os.path.join(HERE, "srce", "cli.js")
 NODE = "node"
 CACHE = os.path.join(HERE, "data", "srccache")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources(
-  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL DEFAULT 0,
+  id TEXT NOT NULL,
   name TEXT NOT NULL,
   url TEXT DEFAULT '',
   grp TEXT DEFAULT '',
   enabled INTEGER DEFAULT 1,
   raw TEXT NOT NULL,
-  added REAL
+  added REAL,
+  PRIMARY KEY(user_id, id)
 );
 """
 
@@ -44,6 +48,14 @@ def init_db():
     os.makedirs(CACHE, exist_ok=True)
     with conn() as c:
         c.executescript(SCHEMA)
+        # 老库（sources 无 user_id）就地重建为复合主键，旧数据 user_id=0 待认领
+        have = {r["name"] for r in c.execute("PRAGMA table_info(sources)")}
+        if "user_id" not in have:
+            c.execute("ALTER TABLE sources RENAME TO sources_old")
+            c.executescript(SCHEMA)
+            c.execute("""INSERT INTO sources(user_id,id,name,url,grp,enabled,raw,added)
+                         SELECT 0,id,name,url,grp,enabled,raw,added FROM sources_old""")
+            c.execute("DROP TABLE sources_old")
         # 增量加列（老库升级）
         for tbl, col, ddl in (
             ("books", "cover", "TEXT DEFAULT ''"),
@@ -63,8 +75,8 @@ def _sid(src):
     return hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
 
 
-def import_sources(raw_bytes):
-    """导入 Legado 分享文件（数组或单个对象）"""
+def import_sources(uid, raw_bytes):
+    """导入 Legado 分享文件（数组或单个对象）；同一用户重复导入=更新"""
     data = json.loads(raw_bytes.decode("utf-8-sig"))
     if isinstance(data, dict):
         data = [data]
@@ -75,12 +87,15 @@ def import_sources(raw_bytes):
             if not isinstance(src, dict) or not src.get("bookSourceUrl"):
                 continue
             sid = _sid(src)
-            exists = c.execute("SELECT 1 FROM sources WHERE id=?", (sid,)).fetchone()
+            exists = c.execute(
+                "SELECT 1 FROM sources WHERE user_id=? AND id=?", (int(uid), sid)
+            ).fetchone()
             c.execute(
-                """INSERT INTO sources(id,name,url,grp,enabled,raw,added) VALUES(?,?,?,?,?,?,?)
-                   ON CONFLICT(id) DO UPDATE SET name=excluded.name, url=excluded.url,
+                """INSERT INTO sources(user_id,id,name,url,grp,enabled,raw,added) VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(user_id,id) DO UPDATE SET name=excluded.name, url=excluded.url,
                      grp=excluded.grp, raw=excluded.raw""",
                 (
+                    int(uid),
                     sid,
                     src.get("bookSourceName") or "未命名",
                     src.get("bookSourceUrl") or "",
@@ -97,15 +112,15 @@ def import_sources(raw_bytes):
     return added, updated
 
 
-def export_sources(only_enabled=False):
+def export_sources(uid, only_enabled=False):
     """导出为 Legado 分享格式（尽量还原原始 JSON，enabled 用库里的当前状态）"""
-    sql = "SELECT name,url,grp,enabled,raw FROM sources"
+    sql = "SELECT name,url,grp,enabled,raw FROM sources WHERE user_id=?"
     if only_enabled:
-        sql += " WHERE enabled=1"
+        sql += " AND enabled=1"
     sql += " ORDER BY grp, name"
     out = []
     with conn() as c:
-        for r in c.execute(sql):
+        for r in c.execute(sql, (int(uid),)):
             try:
                 src = json.loads(r["raw"] or "{}")
             except Exception:
@@ -127,20 +142,20 @@ def export_sources(only_enabled=False):
     return out
 
 
-def list_sources(only_enabled=False):
-    sql = "SELECT id,name,url,grp,enabled FROM sources"
+def list_sources(uid, only_enabled=False):
+    sql = "SELECT id,name,url,grp,enabled FROM sources WHERE user_id=?"
     if only_enabled:
-        sql += " WHERE enabled=1"
+        sql += " AND enabled=1"
     sql += " ORDER BY grp, name"
     with conn() as c:
-        rows = [dict(r) for r in c.execute(sql)]
+        rows = [dict(r) for r in c.execute(sql, (int(uid),))]
     # 按分组统计
     return rows
 
 
-def get_source(sid):
+def get_source(uid, sid):
     with conn() as c:
-        r = c.execute("SELECT * FROM sources WHERE id=?", (sid,)).fetchone()
+        r = c.execute("SELECT * FROM sources WHERE user_id=? AND id=?", (int(uid), sid)).fetchone()
     if not r:
         return None
     d = dict(r)
@@ -148,19 +163,21 @@ def get_source(sid):
     return d
 
 
-def toggle_source(sid, enabled=None):
+def toggle_source(uid, sid, enabled=None):
     with conn() as c:
         if enabled is None:
-            c.execute("UPDATE sources SET enabled=1-enabled WHERE id=?", (sid,))
+            c.execute("UPDATE sources SET enabled=1-enabled WHERE user_id=? AND id=?", (int(uid), sid))
         else:
-            c.execute("UPDATE sources SET enabled=? WHERE id=?", (1 if enabled else 0, sid))
-        r = c.execute("SELECT enabled FROM sources WHERE id=?", (sid,)).fetchone()
-    return bool(r and r["enabled"])
+            c.execute("UPDATE sources SET enabled=? WHERE user_id=? AND id=?",
+                      (1 if enabled else 0, int(uid), sid))
+        r = c.execute("SELECT enabled FROM sources WHERE user_id=? AND id=?",
+                      (int(uid), sid)).fetchone()
+    return None if not r else bool(r["enabled"])
 
 
-def delete_source(sid):
+def delete_source(uid, sid):
     with conn() as c:
-        cur = c.execute("DELETE FROM sources WHERE id=?", (sid,))
+        cur = c.execute("DELETE FROM sources WHERE user_id=? AND id=?", (int(uid), sid))
         return cur.rowcount or 0
 
 
@@ -181,13 +198,13 @@ def call(job, timeout=120):
 
 
 # ---------------- 搜索 ----------------
-def search(key, source_ids=None, page=1, limit=None, timeout=90):
+def search(uid, key, source_ids=None, page=1, limit=None, timeout=90):
     """并发搜索多个源；返回 (结果列表, 统计)"""
     srcs = []
-    for s in list_sources(only_enabled=True):
+    for s in list_sources(uid, only_enabled=True):
         if source_ids and s["id"] not in source_ids:
             continue
-        full = get_source(s["id"])
+        full = get_source(uid, s["id"])
         if full:
             srcs.append(full["json"])
     if limit:
@@ -224,44 +241,42 @@ def search(key, source_ids=None, page=1, limit=None, timeout=90):
 
 
 # ---------------- 详情 / 目录 / 正文 ----------------
-def book_info(sid, book_url):
-    s = get_source(sid)
+def book_info(uid, sid, book_url):
+    s = get_source(uid, sid)
     if not s:
         return {"error": "书源不存在"}
     return call({"cmd": "info", "source": s["json"], "bookUrl": book_url})
 
 
-def book_toc(sid, book_url, toc_url=""):
-    s = get_source(sid)
+def book_toc(uid, sid, book_url, toc_url=""):
+    s = get_source(uid, sid)
     if not s:
         return {"error": "书源不存在"}
     return call({"cmd": "toc", "source": s["json"], "bookUrl": book_url, "tocUrl": toc_url})
 
 
-def chapter_text(sid, chapter_url, book_url=""):
-    s = get_source(sid)
+def chapter_text(uid, sid, chapter_url, book_url=""):
+    s = get_source(uid, sid)
     if not s:
         return {"error": "书源不存在"}
     return call({"cmd": "content", "source": s["json"], "chapterUrl": chapter_url, "bookUrl": book_url})
 
 
-def test_source(sid, key="剑来"):
-    s = get_source(sid)
+def test_source(uid, sid, key="剑来"):
+    s = get_source(uid, sid)
     if not s:
         return {"ok": False, "error": "书源不存在"}
     return call({"cmd": "test", "source": s["json"], "key": key}, timeout=45)
 
 
 # ---------------- 加入书架 ----------------
-def add_book(sid, book, toc_url="", chapters=None):
+def add_book(uid, sid, book, toc_url="", chapters=None):
     """把搜索结果 + 目录写进书架；正文按需抓取"""
-    import booklib
-
-    s = get_source(sid)
+    s = get_source(uid, sid)
     if not s:
         raise ValueError("书源不存在")
     if not chapters:
-        t = book_toc(sid, book["url"], toc_url)
+        t = book_toc(uid, sid, book["url"], toc_url)
         if t.get("error"):
             raise ValueError("取目录失败：" + str(t["error"]))
         chapters = t.get("chapters") or []
@@ -271,16 +286,18 @@ def add_book(sid, book, toc_url="", chapters=None):
         now = time.time()
         # 同一源同一本书重复加入 → 覆盖旧的（避免书架出现两本一样的）
         old = c.execute(
-            "SELECT id FROM books WHERE src_id=? AND src_url=? AND title=?",
-            (sid, book.get("url") or book.get("bookUrl") or "", (book.get("name") or "")[:120]),
+            "SELECT id FROM books WHERE user_id=? AND src_id=? AND src_url=? AND title=?",
+            (int(uid), sid, book.get("url") or book.get("bookUrl") or "",
+             (book.get("name") or "")[:120]),
         ).fetchone()
         if old:
             c.execute("DELETE FROM chapters WHERE book_id=?", (old["id"],))
             c.execute("DELETE FROM books WHERE id=?", (old["id"],))
         cur = c.execute(
-            """INSERT INTO books(title,author,fmt,chars,created,opened,seed,cover,src_id,src_name,src_url)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO books(user_id,title,author,fmt,chars,created,opened,seed,cover,src_id,src_name,src_url)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
+                int(uid),
                 (book.get("name") or "未命名")[:120],
                 book.get("author") or "",
                 "src",
@@ -302,13 +319,13 @@ def add_book(sid, book, toc_url="", chapters=None):
     return bid, len(chapters)
 
 
-def ensure_chapter(bid, idx):
-    """章节正文没抓过就抓一次并落库"""
+def ensure_chapter(uid, bid, idx):
+    """章节正文没抓过就抓一次并落库（校验书属于当前用户）"""
     with conn() as c:
         r = c.execute(
             "SELECT ch.title,ch.content,ch.url,ch.fetched,b.src_id,b.src_url,b.title AS btitle FROM chapters ch "
-            "JOIN books b ON b.id=ch.book_id WHERE ch.book_id=? AND ch.idx=?",
-            (bid, idx),
+            "JOIN books b ON b.id=ch.book_id WHERE ch.book_id=? AND ch.idx=? AND b.user_id=?",
+            (bid, idx, int(uid)),
         ).fetchone()
         if not r:
             return None
@@ -318,7 +335,7 @@ def ensure_chapter(bid, idx):
             return {"title": r["title"], "content": r["content"] or ""}
         sid, ch_url, book_url = r["src_id"], r["url"], r["src_url"]
         title = r["title"]
-    res = chapter_text(sid, ch_url, book_url)
+    res = chapter_text(uid, sid, ch_url, book_url)
     if res.get("error") or not (res.get("content") or "").strip():
         return {"title": title, "content": "", "error": res.get("error") or "正文为空"}
     text = res["content"].strip()
@@ -326,5 +343,5 @@ def ensure_chapter(bid, idx):
         c.execute(
             "UPDATE chapters SET content=?,fetched=1 WHERE book_id=? AND idx=?", (text, bid, idx)
         )
-        c.execute("UPDATE books SET chars=chars+? WHERE id=?", (len(text), bid))
+        c.execute("UPDATE books SET chars=chars+? WHERE id=? AND user_id=?", (len(text), bid, int(uid)))
     return {"title": title, "content": text}

@@ -23,8 +23,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-import booklib
 import auth
+import booklib
+import claim
+import keys
 import sources
 import tts
 
@@ -38,6 +40,7 @@ async def lifespan(_app):
     booklib.init_db()
     sources.init_db()
     auth.init_db()
+    keys.init_db()
     os.makedirs(tts.CACHE_DIR, exist_ok=True)
     auth.purge_expired()
     yield
@@ -87,7 +90,7 @@ PUBLIC_PREFIX = ("/static/", "/api/auth/", "/api/docs", "/api/openapi.json")
 
 
 def token_from(request: Request) -> str:
-    """Web 走 HttpOnly Cookie，App 走 Authorization: Bearer。"""
+    """Web 走 HttpOnly Cookie，App 走 Authorization: ***"""
     raw = request.cookies.get(auth.COOKIE_NAME)
     if raw:
         return raw
@@ -140,8 +143,14 @@ async def api_register(request: Request):
     except auth.AuthError as e:
         return jerr(e.msg, e.status)
     token = auth.create_session(u["id"], auth.device_of(request), ip)
+    claimed = None
+    if auth.count_users() == 1:  # 开放注册的第一个账号 = 老数据的主人
+        try:
+            claimed = claim.claim_legacy(u["id"])
+        except Exception:
+            traceback.print_exc()
     resp = JSONResponse({"ok": True, "user": u, "token": token,
-                         "expires_in": auth.TOKEN_TTL})
+                         "expires_in": auth.TOKEN_TTL, "claimed": claimed})
     set_session_cookie(resp, request, token)
     return resp
 
@@ -178,12 +187,12 @@ async def api_me(request: Request):
     return {"user": u}
 
 
-@app.on_event("startup")
-def on_startup():
-    booklib.init_db()
-    sources.init_db()
-    auth.init_db()
-    os.makedirs(tts.CACHE_DIR, exist_ok=True)
+def uid_of(request: Request) -> int:
+    """中间件已经把当前用户放进 request.state；拿不到就是 401（理论上走不到）。"""
+    u = current_user(request)
+    if not u:
+        raise StarletteHTTPException(status_code=401, detail="请先登录")
+    return int(u["id"])
 
 
 # ---------------- 静态页面 ----------------
@@ -198,29 +207,31 @@ def index():
 
 # ---------------- 书架 / 设置 ----------------
 @app.get("/api/books")
-def api_books():
-    return {"books": booklib.list_books()}
+def api_books(request: Request):
+    return {"books": booklib.list_books(uid_of(request))}
 
 
 @app.get("/api/settings")
-def api_get_settings():
-    return booklib.get_settings()
+def api_get_settings(request: Request):
+    return booklib.get_settings(uid_of(request))
 
 
 @app.put("/api/settings")
 async def api_put_settings(request: Request):
-    booklib.put_settings(await jbody(request))
+    booklib.put_settings(uid_of(request), await jbody(request))
     return {"ok": True}
 
 
 @app.get("/api/presets")
-def api_presets():
+def api_presets(request: Request):
+    uid = uid_of(request)
     return {
         "presets": tts.PRESETS,
         "mimo_voices": tts.MIMO_VOICES,
-        "mimo_ready": tts.mimo_ready(),
+        "mimo_ready": tts.mimo_ready(uid),
+        "mimo_key_masked": keys.masked_for(uid, "mimo"),
         "mimo_modes": tts.MIMO_MODES,
-        "mimo_clones": tts.clone_voices(),
+        "mimo_clones": tts.clone_voices(uid),
         "mimo_design_default": tts.MIMO_DESIGN_DEFAULT,
         "mimo_clone_max": tts.MIMO_CLONE_MAX,
     }
@@ -228,16 +239,17 @@ def api_presets():
 
 # ---------------- 单本书 / 章节 ----------------
 @app.get("/api/books/{bid}")
-def api_book(bid: int):
-    b = booklib.get_book(bid)
+def api_book(bid: int, request: Request):
+    b = booklib.get_book(uid_of(request), bid)
     return b if b else jerr("书不存在", 404)
 
 
 @app.get("/api/books/{bid}/ch/{idx}")
-def api_chapter(bid: int, idx: int):
-    b = booklib.get_book(bid)
+def api_chapter(bid: int, idx: int, request: Request):
+    uid = uid_of(request)
+    b = booklib.get_book(uid, bid)
     if b and b.get("fmt") == "src":
-        got = sources.ensure_chapter(bid, idx)
+        got = sources.ensure_chapter(uid, bid, idx)
         if not got:
             return jerr("章节不存在", 404)
         n = len(b.get("chapters") or [])
@@ -245,29 +257,29 @@ def api_chapter(bid: int, idx: int):
         if got.get("error"):
             paras = ["（抓取失败：%s）" % got["error"]]
         return {"idx": idx, "title": got["title"], "paras": paras, "count": n}
-    ch = booklib.get_chapter(bid, idx)
+    ch = booklib.get_chapter(uid, bid, idx)
     return ch if ch else jerr("章节不存在", 404)
 
 
 @app.get("/api/books/{bid}/search")
-def api_book_search(bid: int, q: str = ""):
+def api_book_search(bid: int, request: Request, q: str = ""):
     kw = (q or "").strip()
     if not kw:
         return jerr("缺少关键词")
-    return {"hits": booklib.search(bid, kw)}
+    return {"hits": booklib.search(uid_of(request), bid, kw)}
 
 
 @app.post("/api/books/{bid}/progress")
 async def api_progress(bid: int, request: Request):
     d = await jbody(request)
-    booklib.set_progress(bid, d.get("ch", 0), d.get("off", 0))
+    booklib.set_progress(uid_of(request), bid, d.get("ch", 0), d.get("off", 0))
     return {"ok": True}
 
 
 @app.delete("/api/books/{bid}")
-def api_delete_book(bid: int):
-    booklib.delete_book(bid)
-    return {"ok": True}
+def api_delete_book(bid: int, request: Request):
+    n = booklib.delete_book(uid_of(request), bid)
+    return {"ok": True, "deleted": n}
 
 
 # ---------------- 导入 ----------------
@@ -290,23 +302,23 @@ async def api_import(request: Request, filename: str = "book.txt"):
         fmt = "txt"
         if not chapters:
             return jerr("解析不出正文，可能不是纯文本")
-    bid = booklib.add_book(title, author, fmt, chapters)
+    bid = booklib.add_book(uid_of(request), title, author, fmt, chapters)
     return {"id": bid, "title": title, "author": author,
             "chapters": len(chapters), "fmt": fmt}
 
 
 # ---------------- 书源 ----------------
 @app.get("/api/sources")
-def api_sources():
-    lst = sources.list_sources()
+def api_sources(request: Request):
+    lst = sources.list_sources(uid_of(request))
     return {"sources": lst, "total": len(lst),
             "enabled": sum(1 for x in lst if x["enabled"])}
 
 
 @app.get("/api/sources/export")
-def api_sources_export(only: str = "0"):
+def api_sources_export(request: Request, only: str = "0"):
     flag = only in ("1", "true", "yes")
-    lst = sources.export_sources(flag)
+    lst = sources.export_sources(uid_of(request), flag)
     data = json.dumps(lst, ensure_ascii=False, indent=1).encode("utf-8")
     fn = "书源-%s-%s.json" % ("启用" if flag else "全部", time.strftime("%Y%m%d"))
     return Response(
@@ -326,11 +338,11 @@ async def api_sources_import(request: Request):
     if not raw:
         return jerr("没有收到内容")
     try:
-        added, updated = sources.import_sources(raw)
+        added, updated = sources.import_sources(uid_of(request), raw)
     except Exception as e:
         return jerr("不是合法的书源 JSON：%s" % e)
     return {"ok": True, "added": added, "updated": updated,
-            "total": len(sources.list_sources())}
+            "total": len(sources.list_sources(uid_of(request)))}
 
 
 @app.post("/api/sources/delete")
@@ -342,7 +354,7 @@ async def api_sources_delete(request: Request):
     n = 0
     for sid in ids:
         try:
-            n += sources.delete_source(str(sid))
+            n += sources.delete_source(uid_of(request), str(sid))
         except Exception:
             traceback.print_exc()
     return {"ok": True, "deleted": n}
@@ -361,63 +373,69 @@ async def api_sources_fetch(request: Request):
     except Exception as e:
         return jerr("下载失败：%s" % e)
     try:
-        added, updated = sources.import_sources(raw)
+        added, updated = sources.import_sources(uid_of(request), raw)
     except Exception as e:
         return jerr("链接内容不是合法的书源 JSON：%s" % e)
     return {"ok": True, "added": added, "updated": updated,
-            "total": len(sources.list_sources())}
+            "total": len(sources.list_sources(uid_of(request)))}
 
 
 @app.delete("/api/sources/{sid}")
-def api_source_delete(sid: str):
-    sources.delete_source(sid)
-    return {"ok": True}
+def api_source_delete(sid: str, request: Request):
+    n = sources.delete_source(uid_of(request), sid)
+    if not n:
+        return jerr("书源不存在", 404)
+    return {"ok": True, "deleted": n}
 
 
 @app.post("/api/sources/{sid}/toggle")
-def api_source_toggle(sid: str):
-    return {"ok": True, "enabled": sources.toggle_source(sid)}
+def api_source_toggle(sid: str, request: Request):
+    res = sources.toggle_source(uid_of(request), sid)
+    if res is None:
+        return jerr("书源不存在", 404)
+    return {"ok": True, "enabled": res}
 
 
 @app.post("/api/sources/{sid}/test")
 async def api_source_test(sid: str, request: Request):
     d = await jbody(request)
-    return sources.test_source(sid, d.get("key") or "剑来")
+    return sources.test_source(uid_of(request), sid, d.get("key") or "剑来")
 
 
 # ---------------- 书源搜书 / 详情 / 目录 / 正文 ----------------
 @app.get("/api/src/search")
-def api_src_search(q: str = "", page: int = 1, sources_: str = Query("", alias="sources")):
+def api_src_search(request: Request, q: str = "", page: int = 1,
+                   sources_: str = Query("", alias="sources")):
     kw = (q or "").strip()
     if not kw:
         return jerr("缺少关键词")
     ids = [x for x in sources_.split(",") if x] if sources_ else None
     t0 = time.time()
-    res, stat = sources.search(kw, ids, page)
+    res, stat = sources.search(uid_of(request), kw, ids, page)
     stat["ms"] = int((time.time() - t0) * 1000)
     return {"key": kw, "results": res, "stats": stat}
 
 
 @app.get("/api/src/info")
-def api_src_info(sid: str = "", url: str = ""):
-    return sources.book_info(sid, url)
+def api_src_info(request: Request, sid: str = "", url: str = ""):
+    return sources.book_info(uid_of(request), sid, url)
 
 
 @app.get("/api/src/toc")
-def api_src_toc(sid: str = "", url: str = "", toc: str = ""):
-    return sources.book_toc(sid, url, toc)
+def api_src_toc(request: Request, sid: str = "", url: str = "", toc: str = ""):
+    return sources.book_toc(uid_of(request), sid, url, toc)
 
 
 @app.get("/api/src/ch")
-def api_src_ch(sid: str = "", url: str = "", book: str = ""):
-    return sources.chapter_text(sid, url, book)
+def api_src_ch(request: Request, sid: str = "", url: str = "", book: str = ""):
+    return sources.chapter_text(uid_of(request), sid, url, book)
 
 
 @app.post("/api/src/add")
 async def api_src_add(request: Request):
     d = await jbody(request)
     try:
-        bid, n = sources.add_book(d.get("sid", ""), d.get("book") or {},
+        bid, n = sources.add_book(uid_of(request), d.get("sid", ""), d.get("book") or {},
                                   d.get("tocUrl", ""), d.get("chapters"))
     except Exception as e:
         return jerr(str(e))
@@ -425,11 +443,11 @@ async def api_src_add(request: Request):
 
 
 # ---------------- TTS ----------------
-def _cfg_from_request(d):
+def _cfg_from_request(uid, d):
     """与旧 server.py 完全一致的配置合并顺序：预设 → 已存设置 → 请求覆盖 → provider profile。"""
     cfg = dict(tts.PRESETS.get("fish", {}))
     cfg.pop("note", None)
-    saved = (booklib.get_settings() or {}).get("tts") or {}
+    saved = (booklib.get_settings(uid) or {}).get("tts") or {}
     cfg.update({k: v for k, v in saved.items() if v not in (None, "")})
     cfg.update({k: v for k, v in (d.get("cfg") or {}).items() if v is not None})
     prov = (d.get("provider") or "").strip()
@@ -442,8 +460,8 @@ def _cfg_from_request(d):
     return cfg
 
 
-def _tts_cfg(d):
-    cfg = _cfg_from_request(d)
+def _tts_cfg(uid, d):
+    cfg = _cfg_from_request(uid, d)
     for k in ("model", "style", "format", "mimoMode", "mimoVoiceDesc", "mimoClone"):
         if d.get(k) not in (None, ""):
             cfg[k] = d[k]
@@ -456,12 +474,13 @@ async def api_tts(request: Request):
     text = (d.get("text") or "").strip()
     if not text:
         return jerr("没有文本")
-    cfg = _tts_cfg(d)
+    uid = uid_of(request)
+    cfg = _tts_cfg(uid, d)
     if cfg.get("engine") == "web":
         return jerr("浏览器语音由前端处理，不该请求这里")
     try:
         audio, ctype, hit = tts.synthesize(
-            cfg, text, d.get("voice"), d.get("speed"), use_cache=d.get("cache", True))
+            uid, cfg, text, d.get("voice"), d.get("speed"), use_cache=d.get("cache", True))
     except tts.TTSError as e:
         return JSONResponse({"error": e.msg, "status": e.status, "body": e.body,
                              "detail": e.detail}, status_code=502)
@@ -472,17 +491,17 @@ async def api_tts(request: Request):
 @app.post("/api/tts/test")
 async def api_tts_test(request: Request):
     d = await jbody(request)
-    cfg = _tts_cfg(d)
+    uid = uid_of(request)
+    cfg = _tts_cfg(uid, d)
     text = (d.get("text") or "你好，这是一次朗读测试。").strip()
     out = {"ok": False}
     t0 = time.time()
     try:
-        audio, ctype, hit = tts.synthesize(cfg, text, d.get("voice"), d.get("speed"), use_cache=False)
+        audio, ctype, hit = tts.synthesize(uid, cfg, text, d.get("voice"), d.get("speed"), use_cache=False)
         out.update(ok=True, bytes=len(audio), content_type=ctype,
                    ms=int((time.time() - t0) * 1000), url=cfg.get("url", "")[:120])
         if len(audio) > 4000:
-            os.makedirs(tts.CACHE_DIR, exist_ok=True)
-            with open(os.path.join(tts.CACHE_DIR, "_last_test.bin"), "wb") as f:
+            with open(os.path.join(tts.cache_dir(uid), "_last_test.bin"), "wb") as f:
                 f.write(audio)
     except tts.TTSError as e:
         out.update(ok=False, error=e.msg, status=e.status, body=e.body,
@@ -491,18 +510,13 @@ async def api_tts_test(request: Request):
 
 
 @app.get("/api/tts/cache")
-def api_tts_cache():
-    d = tts.CACHE_DIR
-    files = [f for f in os.listdir(d) if f.endswith(".bin")] if os.path.isdir(d) else []
-    size = sum(os.path.getsize(os.path.join(d, f)) for f in files) if files else 0
-    return {"files": len(files), "bytes": size}
+def api_tts_cache(request: Request):
+    return tts.cache_stats(uid_of(request))
 
 
 @app.post("/api/tts/cache/clear")
-def api_tts_cache_clear():
-    if os.path.isdir(tts.CACHE_DIR):
-        shutil.rmtree(tts.CACHE_DIR)
-    os.makedirs(tts.CACHE_DIR, exist_ok=True)
+def api_tts_cache_clear(request: Request):
+    tts.cache_clear(uid_of(request))
     return {"ok": True}
 
 
@@ -510,10 +524,11 @@ def api_tts_cache_clear():
 async def api_tts_key(request: Request):
     d = await jbody(request)
     try:
-        tts.save_mimo_key(d.get("key") or "")
+        tts.save_mimo_key(uid_of(request), d.get("key") or "")
     except tts.TTSError as e:
         return jerr(e.msg, 400)
-    return {"ok": True, "ready": tts.mimo_ready()}
+    uid = uid_of(request)
+    return {"ok": True, "ready": tts.mimo_ready(uid), "masked": keys.masked_for(uid, "mimo")}
 
 
 @app.post("/api/tts/mimo/clone")
@@ -524,20 +539,52 @@ async def api_tts_clone(request: Request):
     except Exception:
         return jerr("样本 base64 解不开", 400)
     try:
-        ent = tts.save_clone_voice(d.get("name") or "", raw, d.get("filename") or "")
+        ent = tts.save_clone_voice(uid_of(request), d.get("name") or "", raw, d.get("filename") or "")
     except tts.TTSError as e:
         return jerr(e.msg, 400)
-    return {"ok": True, "saved": ent, "clones": tts.clone_voices()}
+    return {"ok": True, "saved": ent, "clones": tts.clone_voices(uid_of(request))}
 
 
 @app.post("/api/tts/mimo/clone/delete")
 async def api_tts_clone_delete(request: Request):
     d = await jbody(request)
     try:
-        tts.delete_clone_voice(d.get("name") or "")
+        tts.delete_clone_voice(uid_of(request), d.get("name") or "")
     except tts.TTSError as e:
         return jerr(e.msg, 400)
-    return {"ok": True, "clones": tts.clone_voices()}
+    return {"ok": True, "clones": tts.clone_voices(uid_of(request))}
+
+
+# ---------------- 每用户 API Key ----------------
+KEY_PROVIDERS = ("mimo", "fish", "siliconflow", "openai", "azure")
+
+
+@app.get("/api/keys")
+def api_keys(request: Request):
+    uid = uid_of(request)
+    return {"keys": {p: {"has": keys.has_key(uid, p), "masked": keys.masked_for(uid, p)}
+                     for p in KEY_PROVIDERS}}
+
+
+@app.post("/api/keys")
+async def api_keys_set(request: Request):
+    d = await jbody(request)
+    uid = uid_of(request)
+    prov = (d.get("provider") or "").strip()
+    key = (d.get("key") or "").strip()
+    if prov not in KEY_PROVIDERS:
+        return jerr("不支持的 provider")
+    if not key:
+        return jerr("Key 不能为空")
+    keys.set_key(uid, prov, key)
+    return {"ok": True, "provider": prov, "masked": keys.masked_for(uid, prov)}
+
+
+@app.delete("/api/keys/{provider}")
+def api_keys_delete(provider: str, request: Request):
+    uid = uid_of(request)
+    n = keys.delete_key(uid, provider)
+    return {"ok": True, "deleted": n}
 
 
 # ---------------- 静态资源（放最后，避免吃掉 /api） ----------------

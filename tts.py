@@ -10,13 +10,16 @@ import base64
 import hashlib
 import json
 import os
+
+import keys
+import paths
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tts")
+CACHE_DIR = paths.TTS_CACHE
 DEFAULT_PROXY = "http://127.0.0.1:7890"
 
 # ---------------- 小米 MiMo TTS ----------------
@@ -24,7 +27,7 @@ DEFAULT_PROXY = "http://127.0.0.1:7890"
 # 返回 JSON（choices[0].message.audio.data 是 base64 音频），不是二进制流。
 MIMO_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 MIMO_MODEL = "mimo-v2.5-tts"
-MIMO_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mimo.key")
+MIMO_KEY_FILE = paths.LEGACY_MIMO_KEY
 MIMO_STYLE = "自然、平稳的朗读语气，语速适中，适合长篇小说朗读"
 MIMO_FORMATS = {"mp3": "audio/mpeg", "wav": "audio/wav"}
 
@@ -45,7 +48,7 @@ MIMO_MODES = [
 MIMO_DESIGN_DEFAULT = ("五十多岁的男性评书先生，北方口音，嗓音醇厚略带沙哑，"
                        "语速舒缓、抑扬顿挫分明，像在茶馆里讲长篇故事。")
 # 克隆样本：mp3/wav，base64 后要 <10MB（原文约 ≤7MB）
-MIMO_CLONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mimo_clones")
+MIMO_CLONE_DIR = paths.MIMO_CLONES
 MIMO_CLONE_MAX = 7 * 1024 * 1024
 MIMO_CLONE_MIME = {"mp3": "audio/mpeg", "wav": "audio/wav"}
 
@@ -63,34 +66,62 @@ MIMO_VOICES = [
 ]
 
 
-def mimo_key():
-    """小米 API Key：优先环境变量，其次 data/mimo.key（不落前端、不进 Git）。"""
+def mimo_key(uid):
+    """小米 API Key：优先环境变量，其次该用户加密存的 key，最后兼容旧全局 data/mimo.key。
+
+    明文只在服务端内存里出现，不回前端、不进日志。
+    """
     k = (os.environ.get("MIMO_API_KEY") or "").strip()
     if k:
         return k
     try:
-        with open(MIMO_KEY_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+        k = keys.get_key(uid, "mimo")
+        if k:
+            return k
+    except Exception:
+        pass
+    if int(uid) == 0:  # 迁移前的老库/老进程兜底
+        try:
+            with open(MIMO_KEY_FILE, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+    return ""
 
 
-def save_mimo_key(key):
+def save_mimo_key(uid, key):
     key = (key or "").strip()
     if not key:
         raise TTSError("Key 不能为空")
-    os.makedirs(os.path.dirname(MIMO_KEY_FILE), exist_ok=True)
-    fd = os.open(MIMO_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(key + "\n")
-    try:
-        os.chmod(MIMO_KEY_FILE, 0o600)
-    except OSError:
-        pass
+    keys.set_key(uid, "mimo", key)
 
 
-def mimo_ready():
-    return bool(mimo_key())
+def mimo_ready(uid):
+    return bool(mimo_key(uid))
+
+
+def cache_dir(uid):
+    """TTS 缓存按用户分目录，A 的音频不会被 B 命中。"""
+    d = os.path.join(CACHE_DIR, str(int(uid)))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def cache_stats(uid):
+    d = cache_dir(uid)
+    files = [f for f in os.listdir(d) if f.endswith(".bin")]
+    size = sum(os.path.getsize(os.path.join(d, f)) for f in files)
+    return {"files": len(files), "bytes": size}
+
+
+def cache_clear(uid):
+    d = cache_dir(uid)
+    for f in os.listdir(d):
+        try:
+            os.remove(os.path.join(d, f))
+        except OSError:
+            pass
+    return True
 
 
 def is_mimo(cfg):
@@ -102,33 +133,40 @@ def is_mimo(cfg):
 
 # ---------------- 克隆样本库（data/mimo_clones，gitignore 覆盖） ----------------
 
-def _clone_index_path():
-    return os.path.join(MIMO_CLONE_DIR, "index.json")
+def clone_dir(uid):
+    d = os.path.join(MIMO_CLONE_DIR, str(int(uid)))
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
-def _clone_index():
+def _clone_index_path(uid):
+    return os.path.join(clone_dir(uid), "index.json")
+
+
+def _clone_index(uid):
     try:
-        with open(_clone_index_path(), "r", encoding="utf-8") as f:
+        with open(_clone_index_path(uid), "r", encoding="utf-8") as f:
             j = json.load(f)
         return j if isinstance(j, list) else []
     except (OSError, ValueError):
         return []
 
 
-def _clone_write_index(items):
-    os.makedirs(MIMO_CLONE_DIR, exist_ok=True)
-    p = _clone_index_path()
+def _clone_write_index(uid, items):
+    os.makedirs(clone_dir(uid), exist_ok=True)
+    p = _clone_index_path(uid)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=1)
     os.replace(tmp, p)
 
 
-def clone_voices():
+def clone_voices(uid):
     """已保存的克隆样本（只回名字/大小，路径不出服务端）。顺手清掉文件已丢的脏条目。"""
-    out, items, dirty = [], _clone_index(), False
+    out, items, dirty = [], _clone_index(uid), False
+    d = clone_dir(uid)
     for it in items:
-        f = os.path.join(MIMO_CLONE_DIR, str(it.get("file") or ""))
+        f = os.path.join(d, str(it.get("file") or ""))
         if os.path.isfile(f):
             out.append({"name": it.get("name") or "", "file": it.get("file"),
                         "bytes": os.path.getsize(f), "ext": it.get("ext") or "mp3",
@@ -137,15 +175,15 @@ def clone_voices():
             dirty = True
     if dirty:
         try:
-            _clone_write_index([i for i in items
-                                if os.path.isfile(os.path.join(MIMO_CLONE_DIR, str(i.get("file") or "")))])
+            _clone_write_index(uid, [i for i in items
+                                if os.path.isfile(os.path.join(d, str(i.get("file") or "")))])
         except OSError:
             pass
     out.sort(key=lambda x: x.get("added") or 0)
     return out
 
 
-def save_clone_voice(name, data, filename=""):
+def save_clone_voice(uid, name, data, filename=""):
     """存一段样本（mp3/wav）。同名覆盖，旧文件顺手删掉。"""
     name = (name or "").strip() or "未命名样本"
     ext = os.path.splitext(filename or "")[1].lower().lstrip(".")
@@ -158,35 +196,35 @@ def save_clone_voice(name, data, filename=""):
     if len(data) > MIMO_CLONE_MAX:
         raise TTSError("样本太大（%.1f MB），base64 后要 <10MB，请压到 %.0f MB 以内"
                        % (len(data) / 1048576.0, MIMO_CLONE_MAX / 1048576.0))
-    os.makedirs(MIMO_CLONE_DIR, exist_ok=True)
+    d = clone_dir(uid)
     # 文件名带名字哈希：两个人起不同名字但传同一段音频，也不会互相删掉
     fn = hashlib.sha256((name + "\0").encode("utf-8") + data).hexdigest()[:16] + "." + ext
-    with open(os.path.join(MIMO_CLONE_DIR, fn), "wb") as f:
+    with open(os.path.join(d, fn), "wb") as f:
         f.write(data)
-    items = _clone_index()
+    items = _clone_index(uid)
     for old in [i for i in items if i.get("name") == name]:
         if old.get("file") and old["file"] != fn:
-            _drop_file_if_unused(old["file"], items, skip_name=name)
+            _drop_file_if_unused(uid, old["file"], items, skip_name=name)
     items = [i for i in items if i.get("name") != name]
     items.append({"name": name, "file": fn, "ext": ext, "added": int(time.time())})
-    _clone_write_index(items)
+    _clone_write_index(uid, items)
     return {"name": name, "file": fn, "bytes": len(data), "ext": ext}
 
 
-def _drop_file_if_unused(fn, items, skip_name=None):
+def _drop_file_if_unused(uid, fn, items, skip_name=None):
     """还有别的样本条目引用同一个文件时不能删（同名不同内容/同内容不同名都可能撞）。"""
     for i in items:
         if i.get("file") == fn and i.get("name") != skip_name:
             return False
     try:
-        os.remove(os.path.join(MIMO_CLONE_DIR, str(fn)))
+        os.remove(os.path.join(clone_dir(uid), str(fn)))
     except OSError:
         pass
     return True
 
 
-def delete_clone_voice(name):
-    items = _clone_index()
+def delete_clone_voice(uid, name):
+    items = _clone_index(uid)
     keep, gone = [], None
     for i in items:
         if i.get("name") == name:
@@ -195,20 +233,21 @@ def delete_clone_voice(name):
             keep.append(i)
     if not gone:
         raise TTSError("没有这个克隆样本：%s" % name)
-    _drop_file_if_unused(gone.get("file") or "", items, skip_name=name)
-    _clone_write_index(keep)
+    _drop_file_if_unused(uid, gone.get("file") or "", items, skip_name=name)
+    _clone_write_index(uid, keep)
     return True
 
 
-def _clone_data_uri(name):
+def _clone_data_uri(uid, name):
     """返回 (data:audio/...;base64,..., 指纹)。指纹进缓存 key，换样本自动失效。"""
     name = (name or "").strip()
     if not name:
         raise TTSError("音色克隆模式要先选一个样本（或上传一段 mp3/wav）")
-    for it in _clone_index():
+    d = clone_dir(uid)
+    for it in _clone_index(uid):
         if it.get("name") != name:
             continue
-        p = os.path.join(MIMO_CLONE_DIR, str(it.get("file") or ""))
+        p = os.path.join(d, str(it.get("file") or ""))
         if not os.path.isfile(p):
             break
         data = open(p, "rb").read()
@@ -284,8 +323,8 @@ def cache_key(cfg, text):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def cached(key):
-    p = os.path.join(CACHE_DIR, key + ".bin")
+def cached(uid, key):
+    p = os.path.join(cache_dir(uid), key + ".bin")
     if os.path.exists(p):
         meta = p + ".json"
         try:
@@ -296,11 +335,11 @@ def cached(key):
     return None
 
 
-def _save(key, data, ctype):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(os.path.join(CACHE_DIR, key + ".bin"), "wb") as f:
+def _save(uid, key, data, ctype):
+    d = cache_dir(uid)
+    with open(os.path.join(d, key + ".bin"), "wb") as f:
         f.write(data)
-    with open(os.path.join(CACHE_DIR, key + ".bin.json"), "w") as f:
+    with open(os.path.join(d, key + ".bin.json"), "w") as f:
         json.dump({"content_type": ctype, "at": time.time()}, f)
 
 
@@ -318,7 +357,7 @@ def clean_text(t):
     return t.strip()
 
 
-def synthesize(cfg, text, voice=None, speed=None, use_cache=True):
+def synthesize(uid, cfg, text, voice=None, speed=None, use_cache=True):
     """cfg: {url, method, headers, body, proxy, contentType}"""
     voice = voice if voice is not None else cfg.get("voice", "")
     speed = float(speed if speed is not None else cfg.get("speed", 1.0) or 1.0)
@@ -331,7 +370,7 @@ def synthesize(cfg, text, voice=None, speed=None, use_cache=True):
 
     # 小米 MiMo：返回 JSON+base64，走独立分支，不走模板渲染
     if is_mimo(cfg):
-        return synthesize_mimo(cfg, text, voice, use_cache=use_cache)
+        return synthesize_mimo(uid, cfg, text, voice, use_cache=use_cache)
 
     url = render(cfg.get("url", ""), text, voice, speed).strip()
     if not url.startswith("http"):
@@ -339,7 +378,7 @@ def synthesize(cfg, text, voice=None, speed=None, use_cache=True):
 
     key = cache_key({**cfg, "url": url}, text)
     if use_cache:
-        hit = cached(key)
+        hit = cached(uid, key)
         if hit:
             return hit[0], hit[1], True
 
@@ -397,7 +436,7 @@ def synthesize(cfg, text, voice=None, speed=None, use_cache=True):
         ctype = "audio/mpeg"
 
     if use_cache:
-        _save(key, audio, ctype)
+        _save(uid, key, audio, ctype)
     return audio, ctype, False
 
 
@@ -425,7 +464,7 @@ def _mimo_err(body):
     return str(body)[:200]
 
 
-def synthesize_mimo(cfg, text, voice=None, use_cache=True):
+def synthesize_mimo(uid, cfg, text, voice=None, use_cache=True):
     """小米 MiMo TTS：POST /v1/chat/completions，音频在 JSON 的 base64 里。
 
     三种模型（文档「语音合成 MiMo-V2.5-TTS 系列」）：
@@ -434,9 +473,9 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
     - clone ：mimo-v2.5-tts-voiceclone   → audio.voice = data:audio/...;base64,<样本>
     assistant 消息永远是正文；语速不走上游参数，前端 playbackRate 变速。
     """
-    key_api = mimo_key()
+    key_api = mimo_key(uid)
     if not key_api:
-        raise TTSError("小米 API Key 未配置：把 key 写进 data/mimo.key，或设环境变量 MIMO_API_KEY")
+        raise TTSError("你的小米 API Key 还没配置：在朗读设置里填入自己的 key（只存服务端）")
 
     mode = mimo_mode(cfg)
     model = MIMO_MODELS[mode]
@@ -463,7 +502,7 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
         audio = {"format": fmt}
     else:
         clone_name = str(cfg.get("mimoClone") or cfg.get("mimo_clone") or "").strip()
-        uri, fp = _clone_data_uri(clone_name)
+        uri, fp = _clone_data_uri(uid, clone_name)
         voice = clone_name
         voice_key = "%s#%s" % (clone_name, fp)
         user_msg = style
@@ -471,7 +510,7 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
 
     ck = mimo_cache_key(mode, model, voice_key, style, text)
     if use_cache:
-        hit = cached(ck)
+        hit = cached(uid, ck)
         if hit:
             return hit[0], hit[1], True
 
@@ -529,7 +568,7 @@ def synthesize_mimo(cfg, text, voice=None, use_cache=True):
 
     ctype = MIMO_FORMATS.get(fmt, "audio/mpeg")
     if use_cache:
-        _save(ck, audio, ctype)
+        _save(uid, ck, audio, ctype)
     return audio, ctype, False
 
 
