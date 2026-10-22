@@ -142,7 +142,78 @@ def user_by_token(raw: str):
             return None
         if not row["last_used"] or time.time() - row["last_used"] > 300:
             c.execute("UPDATE tokens SET last_used=? WHERE token_hash=?", (time.time(), th))
-        return {"id": row["id"], "username": row["username"]}
+        return {"id": row["id"], "username": row["username"], "expires": row["expires"]}
+
+
+def session_row(raw: str):
+    """按明文 token 查会话行；不存在或已过期返回 None（顺手清掉过期行）。"""
+    if not raw:
+        return None
+    th = _h(raw)
+    with conn() as c:
+        row = c.execute("SELECT * FROM tokens WHERE token_hash=?", (th,)).fetchone()
+        if not row:
+            return None
+        if row["expires"] < time.time():
+            c.execute("DELETE FROM tokens WHERE token_hash=?", (th,))
+            return None
+        return dict(row)
+
+
+def refresh_session(raw: str, device="", ip=""):
+    """换发 token：旧 token 立即失效，新 token 重新计 30 天。
+
+    App 每次启动拿旧 token 换新的，就不用每 30 天让用户重登一次。
+    """
+    row = session_row(raw)
+    if not row:
+        return None
+    new_raw = create_session(row["user_id"], device or row["device"], ip or row["ip"])
+    with conn() as c:
+        c.execute("DELETE FROM tokens WHERE token_hash=?", (row["token_hash"],))
+    return new_raw
+
+
+def list_sessions(user_id: int, current_raw: str = ""):
+    """列出该用户所有未过期会话；sid 用 token_hash 前 12 位，不泄露 token 本身。"""
+    cur = _h(current_raw) if current_raw else ""
+    now = time.time()
+    out = []
+    with conn() as c:
+        rows = c.execute(
+            "SELECT token_hash,device,ip,created,expires,last_used FROM tokens"
+            " WHERE user_id=? AND expires>? ORDER BY created DESC", (int(user_id), now))
+        for r in rows:
+            out.append({
+                "sid": r["token_hash"][:12],
+                "device": r["device"] or "",
+                "ip": r["ip"] or "",
+                "created": r["created"],
+                "expires": r["expires"],
+                "last_used": r["last_used"],
+                "current": r["token_hash"] == cur,
+            })
+    return out
+
+
+def revoke_sid(user_id: int, sid: str) -> int:
+    """按 sid（token_hash 前 12 位）删自己的会话；sid 短于 8 位不认，避免误删。"""
+    sid = (sid or "").strip().lower()
+    if len(sid) < 8 or len(sid) > 64:
+        return 0
+    with conn() as c:
+        cur = c.execute("DELETE FROM tokens WHERE user_id=? AND token_hash LIKE ?",
+                        (int(user_id), sid + "%"))
+        return cur.rowcount
+
+
+def revoke_others(user_id: int, keep_raw: str) -> int:
+    """踢掉除当前设备外的所有会话。"""
+    keep = _h(keep_raw) if keep_raw else ""
+    with conn() as c:
+        cur = c.execute("DELETE FROM tokens WHERE user_id=? AND token_hash<>?",
+                        (int(user_id), keep))
+        return cur.rowcount
 
 
 def revoke(raw: str):
@@ -179,14 +250,14 @@ _HITS = {}
 LIMIT_N, LIMIT_WIN = 5, 60.0
 
 
-def rate_ok(key: str) -> bool:
-    """同一 key（IP）在 60 秒窗口内最多 5 次；返回 False 表示超限。"""
+def rate_ok(key: str, n: int = LIMIT_N, win: float = LIMIT_WIN) -> bool:
+    """同一 key（IP）在 win 秒窗口内最多 n 次；返回 False 表示超限。"""
     now = time.time()
     with _LOCK:
         q = _HITS.setdefault(key, deque())
-        while q and now - q[0] > LIMIT_WIN:
+        while q and now - q[0] > win:
             q.popleft()
-        if len(q) >= LIMIT_N:
+        if len(q) >= n:
             return False
         q.append(now)
         return True

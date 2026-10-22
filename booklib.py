@@ -278,14 +278,22 @@ def add_book(uid, title, author, fmt, chapters):
     return bid
 
 
-def list_books(uid):
+def list_books(uid, limit=0, offset=0):
+    """书架列表（按最近打开倒序）。limit<=0 表示全部，App 分页传 limit/offset。"""
+    sql = ("SELECT b.*, (SELECT COUNT(*) FROM chapters WHERE book_id=b.id) AS ch_count"
+           " FROM books b WHERE b.user_id=? ORDER BY b.opened DESC")
+    args = [int(uid)]
+    if limit and limit > 0:
+        sql += " LIMIT ? OFFSET ?"
+        args += [int(limit), max(0, int(offset or 0))]
     with conn() as c:
-        rows = c.execute(
-            """SELECT b.*, (SELECT COUNT(*) FROM chapters WHERE book_id=b.id) AS ch_count
-               FROM books b WHERE b.user_id=? ORDER BY b.opened DESC""",
-            (int(uid),),
-        ).fetchall()
+        rows = c.execute(sql, args).fetchall()
     return [dict(r) for r in rows]
+
+
+def count_books(uid):
+    with conn() as c:
+        return c.execute("SELECT COUNT(*) FROM books WHERE user_id=?", (int(uid),)).fetchone()[0]
 
 
 def get_book(uid, bid):

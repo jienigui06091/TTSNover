@@ -36,6 +36,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 MAX_UPLOAD = 60 * 1024 * 1024
 
+# App 升级检查：客户端拿 /api/version 比对，低于 min_version 就提示必须更新
+APP_VERSION = os.environ.get("APP_VERSION", "1.1.0")
+APP_MIN_VERSION = os.environ.get("APP_MIN_VERSION", "1.0.0")
+APP_DOWNLOAD_URL = os.environ.get("APP_DOWNLOAD_URL", "")
+APP_NOTES = os.environ.get("APP_NOTES", "")
+
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -50,7 +56,7 @@ async def lifespan(_app):
 
 app = FastAPI(
     title="TTSNover API",
-    version="1.0.0",
+    version=APP_VERSION,
     docs_url="/api/docs",
     redoc_url=None,
     openapi_url="/api/openapi.json",
@@ -95,7 +101,7 @@ TTS_PER_MIN = int(os.environ.get("TTS_PER_MIN", "120"))
 _tts_hits = {}
 _tts_lock = threading.Lock()
 PUBLIC_PREFIX = ("/static/", "/api/auth/", "/api/docs", "/api/openapi.json")
-PUBLIC_EXACT = ("/login", "/favicon.ico")
+PUBLIC_EXACT = ("/login", "/favicon.ico", "/api/version")
 
 
 def token_from(request: Request) -> str:
@@ -154,7 +160,8 @@ async def api_register(request: Request):
         u = auth.create_user(d.get("username") or "", d.get("password") or "")
     except auth.AuthError as e:
         return jerr(e.msg, e.status)
-    token = auth.create_session(u["id"], auth.device_of(request), ip)
+    dev = (d.get("device") or "").strip()[:120] or auth.device_of(request)
+    token = auth.create_session(u["id"], dev, ip)
     claimed = None
     if auth.count_users() == 1:  # 开放注册的第一个账号 = 老数据的主人
         try:
@@ -176,7 +183,8 @@ async def api_login(request: Request):
     u = auth.verify_user(d.get("username") or "", d.get("password") or "")
     if not u:
         return jerr("用户名或密码不对", 401)
-    token = auth.create_session(u["id"], auth.device_of(request), ip)
+    dev = (d.get("device") or "").strip()[:120] or auth.device_of(request)
+    token = auth.create_session(u["id"], dev, ip)
     resp = JSONResponse({"ok": True, "user": u, "token": token,
                          "expires_in": auth.TOKEN_TTL})
     set_session_cookie(resp, request, token)
@@ -192,11 +200,69 @@ async def api_logout(request: Request):
 
 
 @app.get("/api/auth/me")
-async def api_me(request: Request):
+def api_me(request: Request):
     u = current_user(request)
     if not u:
         return jerr("请先登录", 401)
-    return {"user": u}
+    return {"user": {"id": u["id"], "username": u["username"]},
+            "expires_at": u.get("expires")}
+
+
+@app.post("/api/auth/refresh")
+def api_refresh(request: Request):
+    """换发 token：旧 token 立即失效，新 token 重新计 30 天。
+
+    App 启动时拿旧 token 换新的，用户就不用每 30 天重登一次。
+    """
+    raw = getattr(request.state, "token", "") or token_from(request)
+    u = current_user(request)
+    if not u or not raw:
+        return jerr("请先登录", 401)
+    if not auth.rate_ok("refresh:" + auth.client_ip(request), 30, 60.0):
+        return jerr("操作太频繁，请稍后再试", 429)
+    new_raw = auth.refresh_session(raw, auth.device_of(request), auth.client_ip(request))
+    if not new_raw:
+        return jerr("会话已失效，请重新登录", 401)
+    resp = JSONResponse({"ok": True, "token": new_raw, "expires_in": auth.TOKEN_TTL})
+    set_session_cookie(resp, request, new_raw)
+    return resp
+
+
+@app.get("/api/auth/sessions")
+def api_sessions(request: Request):
+    """当前账号的登录设备列表（sid 是 token_hash 前 12 位，不泄露 token）。"""
+    u = current_user(request)
+    if not u:
+        return jerr("请先登录", 401)
+    return {"sessions": auth.list_sessions(u["id"], getattr(request.state, "token", ""))}
+
+
+@app.delete("/api/auth/sessions/{sid}")
+def api_session_revoke(sid: str, request: Request):
+    u = current_user(request)
+    if not u:
+        return jerr("请先登录", 401)
+    n = auth.revoke_sid(u["id"], sid)
+    if n == 0:
+        return jerr("会话不存在", 404)
+    return {"ok": True, "revoked": n}
+
+
+@app.post("/api/auth/logout_all")
+def api_logout_all(request: Request):
+    """踢掉其它所有设备，当前这个会话保留。"""
+    u = current_user(request)
+    if not u:
+        return jerr("请先登录", 401)
+    n = auth.revoke_others(u["id"], getattr(request.state, "token", ""))
+    return {"ok": True, "revoked": n}
+
+
+@app.get("/api/version")
+def api_version():
+    """给 App 做升级检查；不需要登录（还没登录时也得能查）。"""
+    return {"name": "TTSNover", "version": APP_VERSION, "min_version": APP_MIN_VERSION,
+            "api": 1, "download_url": APP_DOWNLOAD_URL, "notes": APP_NOTES}
 
 
 def uid_of(request: Request) -> int:
@@ -226,8 +292,11 @@ def index():
 
 # ---------------- 书架 / 设置 ----------------
 @app.get("/api/books")
-def api_books(request: Request):
-    return {"books": booklib.list_books(uid_of(request))}
+def api_books(request: Request, limit: int = 0, offset: int = 0):
+    """书架列表。limit>0 时按 limit/offset 分页，total 始终是总数。"""
+    uid = uid_of(request)
+    return {"books": booklib.list_books(uid, limit, offset),
+            "total": booklib.count_books(uid)}
 
 
 @app.get("/api/settings")

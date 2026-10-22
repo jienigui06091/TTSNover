@@ -15,7 +15,9 @@ FastAPI + 原生 JS（无构建步骤、无前端框架）。**多用户**：开
 | 密码 | `hashlib.scrypt`（n=2^14, r=8, p=1）+ 每用户随机 salt |
 | 会话 | 30 天；库里只存 `sha256(token)`，明文 token 只在客户端 |
 | Web 登录 | `HttpOnly` + `SameSite=Lax` Cookie（HTTPS 下自动加 `Secure`） |
-| App 登录 | `Authorization: Bearer <token>`，与 Cookie 共用同一张 `tokens` 表 |
+| App 登录 | `Authorization: Bearer {token}`，与 Cookie 共用同一张 `tokens` 表 |
+| 续期 | `POST /api/auth/refresh` 拿旧 token 换新（旧的立刻失效），不用每 30 天重登 |
+| 设备管理 | `GET /api/auth/sessions` 看登录设备，`DELETE /api/auth/sessions/{sid}` 踢单个，`POST /api/auth/logout_all` 踢其它全部 |
 | 隔离 | `books` / `settings(user_id,k)` / `sources(user_id,id)` / `user_keys` / TTS 缓存与克隆样本目录全部按用户 |
 | API Key | 每人自己的 Fish / 小米 key，AES-GCM 加密存 `user_keys`；接口只回 `has` + 掩码（`sk-****3f9a`），明文永不回前端 |
 | 限流 | 登录/注册 5 次/分钟/IP；TTS 120 次/分钟/用户；搜书全服同时 2 个任务，单任务最多 `SEARCH_CONC`（默认 10）个 node 子进程 |
@@ -160,6 +162,7 @@ webreader/
 ├── deploy/Caddyfile            # 反代 + 自动 HTTPS
 ├── deploy/backup.sh            # SQLite backup API 快照 + 轮转
 ├── docs/DEPLOY.md              # 从零上云的完整步骤
+├── docs/APP.md                 # 写 App 的接口约定 + 客户端坑（登录/续期/设备管理/版本检查）
 ├── requirements.txt     # fastapi / uvicorn / cryptography
 ├── sample/测试书.txt     # 演示用
 └── data/                # 运行时生成（不进 Git）
@@ -188,7 +191,9 @@ webreader/
 4. **`data/secret.key` 必须一起搬并单独离线备份**——丢了它，用户存的 API Key 全部解不开
    （也可改用 `WEBREADER_MASTER_KEY` 环境变量）
 5. 搜书要 `node`：`cd srce && npm install --omit=dev`，unit 里已带 `PATH`
-6. App 端：`POST /api/auth/login` 拿 `token`，之后每个请求带 `Authorization: Bearer <token>`；接口文档 `GET /api/docs`
+6. App 端：`POST /api/auth/login` 拿 `token`，之后每个请求带 `Authorization: Bearer {token}`；接口约定、续期、
+   设备管理、版本检查（`/api/version`）、后台朗读要点全在 **[docs/APP.md](docs/APP.md)**；
+   在线接口文档 `GET /api/docs`（免登录）
 7. 容量参考：2 核 2 GB 能跑（`SEARCH_CONC=10`、全服 2 个搜索任务，峰值约 700 MB）；
    宽裕用 2 核 4 GB + 20 GB 盘
 8. 开放注册意味着陌生人能用你的 CPU/带宽跑搜书和 TTS；只给朋友用就关掉注册或加邀请码

@@ -114,7 +114,12 @@ def setup():
     subprocess.run([sys.executable, "tools/migrate_multiuser.py", "--db",
                     os.path.join(TMP, "reader.db")], cwd=ROOT, check=True,
                    stdout=subprocess.DEVNULL)
-    return len(bins)
+    c = sqlite3.connect(os.path.join(TMP, "reader.db"))
+    meta = {"books": c.execute("SELECT COUNT(*) FROM books").fetchone()[0],
+            "sources": c.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
+            "chapters": c.execute("SELECT COUNT(*) FROM chapters").fetchone()[0]}
+    c.close()
+    return len(bins), meta
 
 
 def start():
@@ -138,9 +143,10 @@ def start():
 
 def main():
     global proc
-    nfiles = setup()
+    nfiles, meta = setup()
     proc = start()
-    print("环境：%s（真库副本 + %d 个缓存 + 假 key）" % (TMP, nfiles))
+    print("环境：%s（真库副本：%d 书 / %d 章 / %d 源 + %d 个缓存 + 假 key）"
+          % (TMP, meta["books"], meta["chapters"], meta["sources"], nfiles))
 
     print("A. 首账号认领")
     st, _, b = call("/api/auth/register", "POST", {"username": "主人", "password": "owner-pass-123"})
@@ -148,8 +154,9 @@ def main():
     cl = d.get("claimed") or {}
     tok_a = d.get("token", "")
     check("注册并返回 token", st == 200 and tok_a, str(st))
-    check("认领 5 本书", cl.get("books") == 5, str(cl))
-    check("认领 31 个书源", cl.get("sources") == 31, str(cl))
+    # 线上库的书/源数量会变（用户会删书、加源），断言跟着快照走，脚本才能反复跑
+    check("认领全部书（%d 本）" % meta["books"], cl.get("books") == meta["books"], str(cl))
+    check("认领全部书源（%d 个）" % meta["sources"], cl.get("sources") == meta["sources"], str(cl))
     check("认领缓存文件", cl.get("tts_files") == nfiles, str(cl))
     check("迁移旧小米 key", cl.get("mimo_key") is True, str(cl))
     check("旧 key 明文文件已归档",
@@ -164,12 +171,13 @@ def main():
     st, _, b = call("/api/books", token=tok_a)
     books_a = j(b).get("books") or []
     st, _, b = call("/api/books", token=tok_b)
-    check("A 有书 / B 无书", len(books_a) == 5 and len(j(b).get("books") or []) == 0,
+    check("A 有书 / B 无书", len(books_a) == meta["books"] and len(j(b).get("books") or []) == 0,
           "%d/%d" % (len(books_a), len(j(b).get("books") or [])))
     st, _, b = call("/api/sources", token=tok_a)
     srcs_a = j(b).get("sources") or []
     st, _, b = call("/api/sources", token=tok_b)
-    check("A 有 31 源 / B 无源", len(srcs_a) == 31 and len(j(b).get("sources") or []) == 0,
+    check("A 有 %d 源 / B 无源" % meta["sources"],
+          len(srcs_a) == meta["sources"] and len(j(b).get("sources") or []) == 0,
           "%d/%d" % (len(srcs_a), len(j(b).get("sources") or [])))
     bid = books_a[0]["id"]
     sid = srcs_a[0]["id"]
@@ -183,6 +191,16 @@ def main():
 
     print("C. 阅读链路（A 的真实数据）")
     txt = next((x for x in books_a if x.get("fmt") != "src"), None)
+    tmp_c = None
+    if not txt:
+        # 线上书可能全是书源书（用户把 TXT 删了），这里自己造一本，别让脚本靠数据形状
+        body = ("第一章 甲\n" + "正文甲。" * 40 + "\n\n第二章 乙\n" + "正文乙。" * 40 + "\n")
+        st, _, b = call("/api/import?filename=" + urllib.parse.quote("自检用书.txt"), "POST",
+                        raw=body.encode(), ctype="text/plain", token=tok_a)
+        tmp_c = j(b).get("id")
+        books_a = j(call("/api/books", token=tok_a)[2]).get("books") or []
+        txt = next((x for x in books_a if x["id"] == tmp_c), None)
+        check("线上无 TXT 书时自动导入一本", bool(tmp_c) and txt is not None, str(b[:80]))
     st, _, b = call("/api/books/%d" % txt["id"], token=tok_a)
     check("书详情", st == 200 and j(b).get("title") == txt["title"], str(st))
     st, _, b = call("/api/books/%d/ch/0" % txt["id"], token=tok_a)
@@ -190,22 +208,28 @@ def main():
     check("章节正文", st == 200 and len(d.get("paras") or []) >= 1,
           "%s paras=%s" % (st, len(d.get("paras") or [])))
     check("章节标题", bool(d.get("title")), str(d.get("title"))[:30])
-    st, _, b = call("/api/books/%d/search?q=的" % txt["id"], token=tok_a)
-    check("全书搜索有命中", len(j(b).get("hits") or []) > 0, str(st))
+    kw = next((ch for ch in "".join(d.get("paras") or [])
+               if ch not in "。，、！？：；“”‘’（）【】 \n\t"), "的")
+    st, _, b = call("/api/books/%d/search?q=%s" % (txt["id"], urllib.parse.quote(kw)), token=tok_a)
+    check("全书搜索有命中", len(j(b).get("hits") or []) > 0, "%s kw=%s" % (st, kw))
     st, _, b = call("/api/books/%d/progress" % txt["id"], "POST", {"ch": 3, "off": 0.5}, token=tok_a)
     st, _, b = call("/api/books", token=tok_a)
     nb = next(x for x in (j(b).get("books") or []) if x["id"] == txt["id"])
     check("进度写入并回读", int(nb.get("progress_ch") or -1) == 3, str(nb.get("progress_ch")))
     src = next((x for x in books_a if x.get("fmt") == "src"), None)
-    st, _, b = call("/api/books/%d/ch/0" % src["id"], token=tok_a)
-    check("书源书章节（允许上游失败）", st in (200, 404), str(st))
+    if src:
+        st, _, b = call("/api/books/%d/ch/0" % src["id"], token=tok_a)
+        check("书源书章节（允许上游失败）", st in (200, 404), str(st))
+    if tmp_c:
+        call("/api/books/%d" % tmp_c, "DELETE", token=tok_a)
 
     print("D. 书源增删改 + 导入导出")
     st, h, b = call("/api/sources/export?only=0", token=tok_a)
     hd = {k.lower(): v for k, v in h.items()}
     check("导出带 attachment", st == 200 and "attachment" in (hd.get("content-disposition") or ""),
           str(hd)[:100])
-    check("导出是数组", isinstance(j(b), list) and len(j(b)) == 31, str(len(j(b)) if isinstance(j(b), list) else b[:60]))
+    check("导出是数组", isinstance(j(b), list) and len(j(b)) == meta["sources"],
+          str(len(j(b)) if isinstance(j(b), list) else b[:60]))
     st, _, b = call("/api/sources/import", "POST",
                     raw=json.dumps([{"bookSourceName": "临时源", "bookSourceUrl": "https://x.test"}],
                                    ensure_ascii=False).encode(), token=tok_b)
@@ -215,7 +239,9 @@ def main():
     st, _, b = call("/api/sources/delete", "POST", {"ids": ids}, token=tok_b)
     check("B 批量删除自己的源", j(b).get("deleted") == 1, str(b[:120]))
     st, _, b = call("/api/sources", token=tok_a)
-    check("A 的 31 源没被动", len(j(b).get("sources") or []) == 31, str(len(j(b).get("sources") or [])))
+    check("A 的 %d 源没被动" % meta["sources"],
+          len(j(b).get("sources") or []) == meta["sources"],
+          str(len(j(b).get("sources") or [])))
 
     print("E. 设置 / Key / TTS 配额")
     st, _, b = call("/api/settings", "PUT", {"tts": {"provider": "mimo", "voice": "bob-v"}}, token=tok_b)
@@ -256,6 +282,69 @@ def main():
         "SELECT COUNT(*) FROM chapters WHERE book_id=?", (tmp_id,)).fetchone()[0]
     check("章节级联删除干净", ch_left == 0, "剩 %d" % ch_left)
     check("删空 id 列表 → 400", call("/api/books/delete", "POST", {"ids": []}, token=tok_a)[0] == 400)
+
+    print("H. App 支持：版本 / 书架分页 / 设备管理 / token 续期")
+    st, _, b = call("/api/version")          # 不带 token，模拟 App 启动前的检查
+    d = j(b)
+    check("/api/version 免登录可访问", st == 200 and d.get("version") and d.get("min_version"), str(st))
+    check("/api/version 带 api 版本号", d.get("api") == 1, str(d))
+
+    # 线上书架可能只剩 1 本，先造 3 本再测分页，结果才不依赖真实数据
+    made = []
+    for i in range(3):
+        body = ("第一章 甲\n" + "正文甲。" * 30 + "\n\n第二章 乙\n" + "正文乙。" * 30 + "\n")
+        st, _, b = call("/api/import?filename=" + urllib.parse.quote("分页书%d.txt" % i), "POST",
+                        raw=body.encode(), ctype="text/plain", token=tok_a)
+        made.append(j(b).get("id"))
+    total_now = meta["books"] + 3
+    st, _, b = call("/api/books?limit=2&offset=0", token=tok_a)
+    d = j(b)
+    check("书架分页 limit=2 → 2 本", len(d.get("books") or []) == 2, str(len(d.get("books") or [])))
+    check("分页同时回 total=%d" % total_now, d.get("total") == total_now, str(d.get("total")))
+    st, _, b = call("/api/books?limit=2&offset=%d" % (total_now - 1), token=tok_a)
+    check("分页 offset 到底 → 1 本", len(j(b).get("books") or []) == 1,
+          str(len(j(b).get("books") or [])))
+    st, _, b = call("/api/books", token=tok_a)
+    check("不分页仍返回全部（网页端不受影响）", len(j(b).get("books") or []) == total_now,
+          str(len(j(b).get("books") or [])))
+    st, _, b = call("/api/books/delete", "POST", {"ids": made}, token=tok_a)
+    check("清掉分页用的临时书", j(b).get("deleted") == 3, str(b[:80]))
+
+    st, _, b = call("/api/auth/login", "POST",
+                    {"username": "bob", "password": "bob-pass-12345",
+                     "device": "Pixel 8 / App 1.0"})
+    tok_b2 = j(b).get("token", "")
+    check("登录可带 device 字段", st == 200 and tok_b2, str(st))
+    st, _, b = call("/api/auth/sessions", token=tok_b2)
+    ss = j(b).get("sessions") or []
+    check("会话列表 ≥2 条", len(ss) >= 2, str(len(ss)))
+    check("当前会话被标记 current", any(x.get("current") for x in ss), str(ss)[:120])
+    check("列表显示设备名", any("Pixel" in (x.get("device") or "") for x in ss), str(ss)[:120])
+    check("sid 是 12 位且不等于 token",
+          all(len(x["sid"]) == 12 and x["sid"] != tok_b2 for x in ss), str(ss)[:120])
+    other = next(x["sid"] for x in ss if not x["current"])
+    st, _, b = call("/api/auth/sessions/" + other, "DELETE", token=tok_b2)
+    check("按 sid 踢掉另一个设备", st == 200 and j(b).get("revoked") == 1, str(b[:80]))
+    check("sid 太短 → 404（不误删）",
+          call("/api/auth/sessions/abc", "DELETE", token=tok_b2)[0] == 404)
+    check("别人的 sid 删不动",
+          call("/api/auth/sessions/" + other, "DELETE", token=tok_a)[0] == 404)
+
+    st, _, b = call("/api/auth/refresh", "POST", token=tok_b2)
+    tok_b3 = j(b).get("token", "")
+    check("refresh 返回新 token", st == 200 and tok_b3 and tok_b3 != tok_b2, str(st))
+    check("旧 token 立刻失效", call("/api/auth/me", token=tok_b2)[0] == 401)
+    check("新 token 可用", call("/api/auth/me", token=tok_b3)[0] == 200)
+    check("未登录 refresh → 401", call("/api/auth/refresh", "POST")[0] == 401)
+    st, _, b = call("/api/auth/me", token=tok_b3)
+    check("/api/auth/me 回 expires_at", (j(b).get("expires_at") or 0) > time.time(), str(j(b)))
+
+    st, _, b = call("/api/auth/login", "POST", {"username": "bob", "password": "bob-pass-12345"})
+    tok_b4 = j(b).get("token", "")
+    st, _, b = call("/api/auth/logout_all", "POST", token=tok_b4)
+    check("logout_all 踢掉其它设备", st == 200 and j(b).get("revoked") >= 1, str(b[:80]))
+    check("logout_all 保留当前会话", call("/api/auth/me", token=tok_b4)[0] == 200)
+    check("被踢的 token 已失效", call("/api/auth/me", token=tok_b3)[0] == 401)
 
     print("G. 线上 8848 鉴权闸门")
     st, h, b = call("/", base=LIVE)
