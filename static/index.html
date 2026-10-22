@@ -213,6 +213,10 @@
       <span id="srcStat" class="hint"></span>
     </div>
     <div class="src-actions-group">
+      <button class="btn primary sm" id="btnSrcAdd" title="粘贴书源 JSON 或从链接添加">
+        <svg class="svg-icon"><use href="#icon-plus"></use></svg>
+        <span>添加</span>
+      </button>
       <button class="btn ghost sm" id="btnSrcToggleAll" title="一键开启或停用所有源">全选/反选</button>
       <button class="btn ghost sm" id="btnSrcExportOn" title="导出启用中的书源">
         <svg class="svg-icon"><use href="#icon-export"></use></svg>
@@ -625,6 +629,39 @@
     <button class="btn primary wide btn-save-action" id="btnSaveSet">
       <span>保存并应用全部设置</span>
     </button>
+  </div>
+</div>
+
+<!-- ============ 添加书源面板 ============ -->
+<div id="srcAddPanel" class="sheet glass hide">
+  <div class="sheet-grab"></div>
+  <div class="sheet-header">
+    <div class="sheet-title">添加书源</div>
+    <button class="btn btn-icon ghost sheet-close-btn" id="btnSrcAddClose">✕</button>
+  </div>
+
+  <div class="tab-body">
+    <div class="setting-group">
+      <div class="row col">
+        <label>粘贴书源 JSON（单个对象或数组）</label>
+        <textarea id="srcAddText" class="modern-code-editor" rows="9" spellcheck="false"
+          placeholder='{"bookSourceName":"示例书源","bookSourceUrl":"https://example.com","searchUrl":"/search?q={{key}}","enabled":true}'></textarea>
+        <p class="hint">从「阅读」App 导出/分享的书源 JSON 整段粘进来即可；同名书源会被更新，不会重复。</p>
+      </div>
+
+      <div class="row col">
+        <label>或者：从链接导入（服务端下载，避开浏览器跨域）</label>
+        <input id="srcAddUrl" class="modern-input" placeholder="https://example.com/sources.json">
+        <p class="hint">支持 json / txt 直链，GitHub raw 地址也行；填了链接就优先用链接，忽略上面的 JSON。</p>
+      </div>
+
+      <p class="hint" id="srcAddMsg"></p>
+    </div>
+  </div>
+
+  <div class="sheet-footer">
+    <button class="btn ghost" id="btnSrcAddCancel">取消</button>
+    <button class="btn primary" id="btnSrcAddSave">添加</button>
   </div>
 </div>
 

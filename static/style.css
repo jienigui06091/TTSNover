@@ -1845,6 +1845,8 @@ body[data-theme="green"] .setting-group {
   display: flex;
   gap: 6px;
   margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .src-list {
   flex: 1;
@@ -1924,6 +1926,15 @@ body[data-theme="green"] .setting-group {
 .src-row .mini:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+.src-row .mini.danger {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.3);
+}
+.src-row .mini.danger:hover {
+  border-color: #f87171;
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
 }
 
 /* ---------- 自定义确认弹窗 (Confirm Modal) ---------- */

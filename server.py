@@ -14,6 +14,7 @@ import sys
 import time
 import traceback
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import booklib
@@ -194,6 +195,24 @@ class Handler(BaseHTTPRequestHandler):
                     added, updated = sources.import_sources(raw)
                 except Exception as e:
                     return self.err("不是合法的书源 JSON：%s" % e)
+                return self.send_json({"ok": True, "added": added, "updated": updated,
+                                       "total": len(sources.list_sources())})
+            if p == "/api/sources/fetch":
+                d = jbody(self)
+                url = (d.get("url") or "").strip()
+                if not url.lower().startswith(("http://", "https://")):
+                    return self.err("请填 http(s) 开头的书源链接")
+                try:
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0 (webreader)"})
+                    with urllib.request.urlopen(req, timeout=25) as r:
+                        raw = r.read(20 * 1024 * 1024)
+                except Exception as e:
+                    return self.err("下载失败：%s" % e)
+                try:
+                    added, updated = sources.import_sources(raw)
+                except Exception as e:
+                    return self.err("链接内容不是合法的书源 JSON：%s" % e)
                 return self.send_json({"ok": True, "added": added, "updated": updated,
                                        "total": len(sources.list_sources())})
             if p == "/api/src/add":

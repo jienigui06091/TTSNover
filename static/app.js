@@ -1289,7 +1289,8 @@ function renderSourcesList(list) {
         <b>${escapeHtml(s.name)}</b>
         <span>${escapeHtml((s.url || '').replace(/^https?:\/\//, '').slice(0, 42))}</span>
       </div>
-      <button class="mini" title="单源并发测试">测试</button>`;
+      <button class="mini" title="单源并发测试">测试</button>
+      <button class="mini danger" title="删除此书源">删除</button>`;
       
     row.querySelector('.sw').onclick = async (ev) => {
       const b = ev.currentTarget;
@@ -1321,6 +1322,24 @@ function renderSourcesList(list) {
         toast(s.name + '：' + e.message, 'err', 3500);
       }
       setTimeout(() => { b.disabled = false; b.textContent = '测试'; }, 2500);
+    };
+
+    row.querySelector('.mini.danger').onclick = () => {
+      showConfirm({
+        title: '删除书源',
+        msg: `确定删除「${s.name}」吗？删掉后要重新导入才能恢复。`,
+        okText: '删除',
+        onOk: async () => {
+          try {
+            await api(`/api/sources/${s.id}`, { method: 'DELETE' });
+            sourcesList = sourcesList.filter((x) => x.id !== s.id);
+            renderSourcesList(sourcesList);
+            toast(`已删除「${s.name}」`, 'ok');
+          } catch (e) {
+            toast('删除失败：' + e.message, 'err', 4000);
+          }
+        },
+      });
     };
     box.appendChild(row);
   }
@@ -1361,6 +1380,63 @@ async function importSourceFile(f) {
   }
 }
 
+/* ---------------- 添加书源面板 ---------------- */
+function openSrcAdd() {
+  $('#srcAddText').value = '';
+  $('#srcAddUrl').value = '';
+  $('#srcAddMsg').textContent = '';
+  $('#srcAddMsg').style.color = '';
+  const btn = $('#btnSrcAddSave');
+  btn.disabled = false;
+  btn.textContent = '添加';
+  $('#srcAddPanel').classList.remove('hide');
+  $('#mask').classList.remove('hide');
+  setTimeout(() => $('#srcAddText').focus(), 120);
+}
+
+function closeSrcAdd() {
+  $('#srcAddPanel').classList.add('hide');
+  if ($('#setPanel').classList.contains('hide') && $('#ttsPanel').classList.contains('hide')) {
+    $('#mask').classList.add('hide');
+  }
+}
+
+function srcAddMsg(text, isErr) {
+  const el = $('#srcAddMsg');
+  el.textContent = text;
+  el.style.color = isErr ? 'var(--err)' : '';
+}
+
+async function submitSrcAdd() {
+  const url = $('#srcAddUrl').value.trim();
+  const text = $('#srcAddText').value.trim();
+  if (!url && !text) {
+    srcAddMsg('请粘贴书源 JSON，或填写一个书源链接', true);
+    return;
+  }
+  const btn = $('#btnSrcAddSave');
+  btn.disabled = true;
+  btn.textContent = '添加中…';
+  srcAddMsg('正在添加…');
+  try {
+    const r = url
+      ? await api('/api/sources/fetch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        })
+      : await api('/api/sources/import', { method: 'POST', body: text });
+    toast(`添加成功：新增 ${r.added} 个，更新 ${r.updated} 个，共 ${r.total} 个`, 'ok', 4000);
+    closeSrcAdd();
+    srcIndex = null;
+    openSources();
+  } catch (e) {
+    srcAddMsg('添加失败：' + e.message, true);
+    btn.disabled = false;
+    btn.textContent = '添加';
+  }
+}
+
 /* ---------------- 事件监听绑定 ---------------- */
 function bind() {
   // 书架筛选与导入
@@ -1396,6 +1472,10 @@ function bind() {
   // 书源页面事件
   $('#btnSrcExportOn').onclick = () => exportSources(true);
   $('#btnSrcExportAll').onclick = () => exportSources(false);
+  $('#btnSrcAdd').onclick = openSrcAdd;
+  $('#btnSrcAddClose').onclick = closeSrcAdd;
+  $('#btnSrcAddCancel').onclick = closeSrcAdd;
+  $('#btnSrcAddSave').onclick = submitSrcAdd;
   $('#btnDiscover').onclick = () => { showView('discover'); $('#searchInput').focus(); };
   $('#btnDiscBack').onclick = () => showView('shelf');
   $('#btnDoSearch').onclick = doSearch;
@@ -1446,7 +1526,7 @@ function bind() {
   const btnTtsClose = $('#btnTtsPanelClose');
   if (btnTtsClose) btnTtsClose.onclick = () => setTtsPanel(false);
 
-  $('#mask').onclick = () => { closeDrawer(); closeSet(); setTtsPanel(false); };
+  $('#mask').onclick = () => { closeDrawer(); closeSet(); setTtsPanel(false); closeSrcAdd(); };
   $('#btnReaderSet').onclick = () => openSet('read');
   $('#btnPrev').onclick = () => loadChapter(chIdx - 1, 0);
   $('#btnNext').onclick = () => loadChapter(chIdx + 1, 0);
