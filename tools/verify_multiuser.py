@@ -156,8 +156,7 @@ def main():
     sid = srcs_a[0]["id"]
     check("B 读 A 的书 → 404", call("/api/books/%d" % bid, token=tok_b)[0] == 404)
     check("B 读 A 章节 → 404", call("/api/books/%d/ch/0" % bid, token=tok_b)[0] == 404)
-    check("B 删 A 书 → deleted:0",
-          j(call("/api/books/%d" % bid, "DELETE", token=tok_b)[2]).get("deleted") == 0)
+    check("B 单本删 A 书 → 404", call("/api/books/%d" % bid, "DELETE", token=tok_b)[0] == 404)
     check("B 删 A 源 → 404", call("/api/sources/%s" % sid, "DELETE", token=tok_b)[0] == 404)
     check("B 切 A 源 → 404", call("/api/sources/%s/toggle" % sid, "POST", token=tok_b)[0] == 404)
     check("B 搜 A 正文 → 0 命中",

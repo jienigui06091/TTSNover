@@ -298,6 +298,8 @@ async def api_progress(bid: int, request: Request):
 @app.delete("/api/books/{bid}")
 def api_delete_book(bid: int, request: Request):
     n = booklib.delete_book(uid_of(request), bid)
+    if not n:
+        return jerr("书不存在", 404)
     return {"ok": True, "deleted": n}
 
 
