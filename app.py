@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import booklib
+import auth
 import sources
 import tts
 
@@ -36,7 +37,9 @@ MAX_UPLOAD = 60 * 1024 * 1024
 async def lifespan(_app):
     booklib.init_db()
     sources.init_db()
+    auth.init_db()
     os.makedirs(tts.CACHE_DIR, exist_ok=True)
+    auth.purge_expired()
     yield
 
 
@@ -78,10 +81,108 @@ async def on_http_error(request: Request, exc: StarletteHTTPException):
     return JSONResponse({"error": detail}, status_code=exc.status_code)
 
 
+# ---------------- 鉴权 ----------------
+AUTH_ENFORCE = os.environ.get("AUTH_ENFORCE", "1").lower() not in ("0", "false", "no")
+PUBLIC_PREFIX = ("/static/", "/api/auth/", "/api/docs", "/api/openapi.json")
+
+
+def token_from(request: Request) -> str:
+    """Web 走 HttpOnly Cookie，App 走 Authorization: Bearer。"""
+    raw = request.cookies.get(auth.COOKIE_NAME)
+    if raw:
+        return raw
+    h = request.headers.get("authorization") or ""
+    if h.lower().startswith("bearer "):
+        return h[7:].strip()
+    return ""
+
+
+def set_session_cookie(resp: Response, request: Request, token: str):
+    https = (request.headers.get("x-forwarded-proto") == "https"
+             or request.url.scheme == "https")
+    resp.set_cookie(auth.COOKIE_NAME, token, max_age=auth.TOKEN_TTL,
+                    httponly=True, samesite="lax", secure=https, path="/")
+
+
+def current_user(request: Request):
+    return getattr(request.state, "user", None)
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    path = request.url.path
+    # 先解析凭据（公开路径也解析，/api/auth/me、/api/auth/logout 才能拿到当前用户）
+    raw = token_from(request)
+    user = auth.user_by_token(raw) if raw else None
+    if user:
+        request.state.user = user
+        request.state.token = raw
+    if user or path == "/" or path.startswith(PUBLIC_PREFIX):
+        return await call_next(request)
+    if not AUTH_ENFORCE:
+        # 开发期兜底：未登录时按首个账号处理（AUTH_ENFORCE=0 才生效）
+        u = auth.first_user()
+        if u:
+            request.state.user = u
+            request.state.token = ""
+            return await call_next(request)
+    return JSONResponse({"error": "请先登录", "code": "unauthorized"}, status_code=401)
+
+
+@app.post("/api/auth/register")
+async def api_register(request: Request):
+    ip = auth.client_ip(request)
+    if not auth.rate_ok("reg:" + ip):
+        return jerr("操作太频繁，请 1 分钟后再试", 429)
+    d = await jbody(request)
+    try:
+        u = auth.create_user(d.get("username") or "", d.get("password") or "")
+    except auth.AuthError as e:
+        return jerr(e.msg, e.status)
+    token = auth.create_session(u["id"], auth.device_of(request), ip)
+    resp = JSONResponse({"ok": True, "user": u, "token": token,
+                         "expires_in": auth.TOKEN_TTL})
+    set_session_cookie(resp, request, token)
+    return resp
+
+
+@app.post("/api/auth/login")
+async def api_login(request: Request):
+    ip = auth.client_ip(request)
+    if not auth.rate_ok("login:" + ip):
+        return jerr("登录尝试太频繁，请 1 分钟后再试", 429)
+    d = await jbody(request)
+    u = auth.verify_user(d.get("username") or "", d.get("password") or "")
+    if not u:
+        return jerr("用户名或密码不对", 401)
+    token = auth.create_session(u["id"], auth.device_of(request), ip)
+    resp = JSONResponse({"ok": True, "user": u, "token": token,
+                         "expires_in": auth.TOKEN_TTL})
+    set_session_cookie(resp, request, token)
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def api_logout(request: Request):
+    auth.revoke(token_from(request))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+async def api_me(request: Request):
+    u = current_user(request)
+    if not u:
+        return jerr("请先登录", 401)
+    return {"user": u}
+
+
 @app.on_event("startup")
 def on_startup():
     booklib.init_db()
     sources.init_db()
+    auth.init_db()
     os.makedirs(tts.CACHE_DIR, exist_ok=True)
 
 

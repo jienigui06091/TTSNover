@@ -10,7 +10,7 @@ import zipfile
 from html.parser import HTMLParser
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-DB_PATH = os.path.join(DATA, "reader.db")
+DB_PATH = os.environ.get("WEBREADER_DB") or os.path.join(DATA, "reader.db")
 
 # ---------- 章节识别 ----------
 CN_NUM = "0-9零一二三四五六七八九十百千万两〇"

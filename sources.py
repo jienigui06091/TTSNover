@@ -15,7 +15,7 @@ import subprocess
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(HERE, "data", "reader.db")
+DB = os.environ.get("WEBREADER_DB") or os.path.join(HERE, "data", "reader.db")
 CLI = os.path.join(HERE, "srce", "cli.js")
 NODE = "node"
 CACHE = os.path.join(HERE, "data", "srccache")
