@@ -48,6 +48,9 @@ let sourcesList = [];       // 书源列表缓存
 let srcMulti = false;       // 多选模式（批量删除）
 const srcSel = new Set();   // 多选模式下已选中的书源 id
 let curSrcList = [];        // 当前渲染出来的列表（受筛选影响）
+let shelfMulti = false;     // 书架多选模式（批量删除）
+const shelfSel = new Set(); // 多选模式下已选中的书籍 id
+let curShelfList = [];      // 书架当前渲染出来的列表（受筛选影响）
 
 /* ---------------- 基础工具函数 ---------------- */
 async function api(path, opts = {}) {
@@ -171,6 +174,7 @@ async function loadShelf() {
 function renderShelfGrid(books) {
   const grid = $('#grid');
   const empty = $('#shelfEmpty');
+  curShelfList = books || [];
   grid.innerHTML = '';
   
   if (!books || books.length === 0) {
@@ -183,12 +187,15 @@ function renderShelfGrid(books) {
     const pct = b.ch_count ? Math.min(100, Math.round((b.progress_ch + (b.progress_off || 0)) / b.ch_count * 100)) : 0;
     const hue = (b.seed * 37) % 360;
     const card = document.createElement('div');
-    card.className = 'card';
+    const picked = shelfSel.has(b.id);
+    card.className = 'card' + (shelfMulti ? ' multi' : '') + (picked ? ' sel' : '');
+    card.dataset.bid = b.id;
     
     // 生成质感渐变
     const grad = `linear-gradient(150deg, hsl(${hue} 48% 36%), hsl(${(hue + 45) % 360} 54% 18%))`;
     
     card.innerHTML = `
+      ${shelfMulti ? `<button class="card-check${picked ? ' on' : ''}" title="选中"></button>` : ''}
       <div class="cover" style="background:${grad}">
         <div class="cover-title">${escapeHtml(b.title)}</div>
         <div class="cover-bottom-tag">${pct > 0 ? `已读 ${pct}%` : '未开始'}</div>
@@ -224,7 +231,16 @@ function renderShelfGrid(books) {
       });
     };
 
-    card.onclick = () => openBook(b.id);
+    const check = card.querySelector('.card-check');
+    const togglePick = () => {
+      if (shelfSel.has(b.id)) shelfSel.delete(b.id);
+      else shelfSel.add(b.id);
+      card.classList.toggle('sel', shelfSel.has(b.id));
+      if (check) check.classList.toggle('on', shelfSel.has(b.id));
+      updateShelfBulk();
+    };
+    if (check) check.onclick = (ev) => { ev.stopPropagation(); togglePick(); };
+    card.onclick = () => (shelfMulti ? togglePick() : openBook(b.id));
     grid.appendChild(card);
   }
 }
@@ -238,6 +254,60 @@ function filterShelf(kw) {
   }
   const filtered = shelfBooksList.filter((b) => (b.title || '').toLowerCase().includes(kw));
   renderShelfGrid(filtered);
+}
+
+/* ---------------- 书架多选 / 批量删除 ---------------- */
+function setShelfMulti(on) {
+  shelfMulti = on;
+  shelfSel.clear();
+  const btn = $('#btnShelfMulti');
+  btn.classList.toggle('primary', on);
+  btn.classList.toggle('ghost', !on);
+  const t = btn.querySelector('.btn-text');
+  if (t) t.textContent = on ? '完成' : '多选';
+  $('#shelfBulkBar').classList.toggle('hide', !on);
+  filterShelf($('#shelfFilter') ? $('#shelfFilter').value : '');
+  updateShelfBulk();
+}
+
+function updateShelfBulk() {
+  if (!shelfMulti) return;
+  const n = shelfSel.size;
+  const info = $('#shelfBulkInfo');
+  if (info) info.textContent = `已选 ${n} 本${n ? ' · 共 ' + curShelfList.length + ' 本可见' : ''}`;
+  const del = $('#btnShelfDelSel');
+  if (del) del.disabled = n === 0;
+}
+
+function deleteSelectedBooks() {
+  const ids = [...shelfSel];
+  if (!ids.length) return;
+  const names = curShelfList.filter((b) => shelfSel.has(b.id)).map((b) => b.title);
+  const sample = names.slice(0, 3).join('》、《');
+  showConfirm({
+    title: `删除 ${ids.length} 本书`,
+    msg: `将删除《${sample}》${ids.length > 3 ? ` 等 ${ids.length} 本` : ''}。章节正文和阅读进度会一起删掉，删了要重新导入。`,
+    okText: '删除',
+    onOk: async () => {
+      let done = 0;
+      try {
+        const r = await api('/api/books/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        });
+        done = r.deleted || 0;
+      } catch (e) {
+        toast('批量删除失败：' + e.message, 'err', 4000);
+        return;
+      }
+      shelfBooksList = shelfBooksList.filter((x) => !shelfSel.has(x.id));
+      shelfSel.clear();
+      filterShelf($('#shelfFilter') ? $('#shelfFilter').value : '');
+      updateShelfBulk();
+      toast(`已删除 ${done} 本书`, 'ok', 3000);
+    },
+  });
 }
 
 /* ---------------- 本地文件导入 ---------------- */
@@ -1521,6 +1591,20 @@ function bind() {
     shelfFilter.oninput = (e) => filterShelf(e.target.value);
   }
   $('#btnImport').onclick = () => $('#fileInput').click();
+  // 书架多选 / 批量删除
+  $('#btnShelfMulti').onclick = () => setShelfMulti(!shelfMulti);
+  $('#btnShelfMultiExit').onclick = () => setShelfMulti(false);
+  $('#btnShelfSelAll').onclick = () => {
+    curShelfList.forEach((b) => shelfSel.add(b.id));
+    filterShelf($('#shelfFilter') ? $('#shelfFilter').value : '');
+    updateShelfBulk();
+  };
+  $('#btnShelfSelNone').onclick = () => {
+    shelfSel.clear();
+    filterShelf($('#shelfFilter') ? $('#shelfFilter').value : '');
+    updateShelfBulk();
+  };
+  $('#btnShelfDelSel').onclick = deleteSelectedBooks;
   const emptyImport = $('#btnEmptyImport');
   if (emptyImport) emptyImport.onclick = () => $('#fileInput').click();
   const emptyDisc = $('#btnEmptyDiscover');

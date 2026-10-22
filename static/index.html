@@ -119,6 +119,10 @@
         <svg class="svg-icon"><use href="#icon-source"></use></svg>
         <span class="btn-text">书源</span>
       </button>
+      <button id="btnShelfMulti" class="btn btn-icon ghost" title="多选书籍，批量删除">
+        <svg class="svg-icon"><use href="#icon-trash"></use></svg>
+        <span class="btn-text">多选</span>
+      </button>
       <button id="btnImport" class="btn primary btn-icon" title="上传 TXT 或 EPUB 文件">
         <svg class="svg-icon"><use href="#icon-upload"></use></svg>
         <span class="btn-text">导入书籍</span>
@@ -133,6 +137,16 @@
   </header>
 
   <input type="file" id="fileInput" accept=".txt,.epub,text/plain,application/epub+zip" multiple hidden>
+
+  <div id="shelfBulkBar" class="src-bulkbar shelf-bulkbar glass hide">
+    <span id="shelfBulkInfo" class="hint">已选 0 本</span>
+    <div class="src-bulk-actions">
+      <button class="btn ghost sm" id="btnShelfSelAll" title="选中当前可见的全部书籍">全选</button>
+      <button class="btn ghost sm" id="btnShelfSelNone">清空</button>
+      <button class="btn danger sm" id="btnShelfDelSel">删除选中</button>
+      <button class="btn ghost sm" id="btnShelfMultiExit">退出</button>
+    </div>
+  </div>
 
   <main class="shelf-main" id="shelfMain">
     <div id="grid" class="grid"></div>

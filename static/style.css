@@ -679,6 +679,66 @@ code {
   transform: scale(1.08);
 }
 
+/* 触摸设备没有 hover：删除按钮常显，否则手机上根本点不到 */
+@media (hover: none) {
+  .card .del {
+    opacity: 0.92;
+    transform: scale(1);
+  }
+}
+
+/* ---------- 书架多选 / 批量删除 ---------- */
+.card.multi {
+  user-select: none;
+}
+.card.multi .del {
+  display: none;
+}
+.card.multi:hover {
+  transform: none;
+}
+.card.sel .cover {
+  box-shadow: 0 0 0 2.5px var(--accent), 0 8px 20px -4px rgba(0, 0, 0, 0.45);
+}
+.card.sel .name {
+  color: var(--accent);
+}
+.card-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid rgba(255, 255, 255, 0.7);
+  background: rgba(17, 24, 39, 0.8);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 6;
+  transition: all var(--transition-fast);
+}
+.card-check::after {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg) translate(1px, -1px);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+.card-check.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.5);
+}
+.card-check.on::after {
+  opacity: 1;
+}
+
 /* 空书架拖拽区 */
 .shelf-empty {
   display: flex;

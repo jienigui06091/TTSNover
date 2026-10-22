@@ -301,6 +301,17 @@ def api_delete_book(bid: int, request: Request):
     return {"ok": True, "deleted": n}
 
 
+@app.post("/api/books/delete")
+async def api_books_delete(request: Request):
+    """书架批量删除：只删自己的书，章节级联清掉。"""
+    d = await jbody(request)
+    ids = d.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        return jerr("没有选中任何书籍")
+    n = booklib.delete_books(uid_of(request), ids)
+    return {"ok": True, "deleted": n}
+
+
 # ---------------- 导入 ----------------
 @app.post("/api/import")
 async def api_import(request: Request, filename: str = "book.txt"):

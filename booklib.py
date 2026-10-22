@@ -334,6 +334,28 @@ def delete_book(uid, bid):
         return cur.rowcount or 0
 
 
+def delete_books(uid, bids):
+    """批量删除：只删自己的书，章节一起级联清掉，返回真正删掉的条数。"""
+    ids = []
+    for x in bids or []:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return 0
+    ph = ",".join("?" * len(ids))
+    with conn() as c:
+        own = [r["id"] for r in c.execute(
+            "SELECT id FROM books WHERE user_id=? AND id IN (%s)" % ph, (int(uid), *ids))]
+        if not own:
+            return 0
+        ph2 = ",".join("?" * len(own))
+        c.execute("DELETE FROM chapters WHERE book_id IN (%s)" % ph2, own)
+        cur = c.execute("DELETE FROM books WHERE user_id=? AND id IN (%s)" % ph2, (int(uid), *own))
+        return cur.rowcount or 0
+
+
 def search(uid, bid, kw, limit=40):
     like = f"%{kw}%"
     out = []

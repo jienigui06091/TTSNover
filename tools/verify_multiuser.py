@@ -203,7 +203,27 @@ def main():
     codes = [call("/api/tts/test", "POST", {"text": "x"}, token=tok_b)[0] for _ in range(12)]
     check("TTS 测试接口限流生效", 429 in codes, str(codes))
 
-    print("F. 线上 8848 鉴权闸门")
+    print("F. 书架删除（批量 + 级联 + 越权）")
+    txt = ("第一章 甲\n" + "正文甲。" * 40 + "\n\n第二章 乙\n" + "正文乙。" * 40 +
+           "\n\n第三章 丙\n" + "正文丙。" * 40 + "\n")
+    st, _, b = call("/api/import?filename=" + urllib.parse.quote("临时书.txt"), "POST",
+                    raw=txt.encode(), ctype="text/plain", token=tok_a)
+    tmp_id = j(b).get("id")
+    check("导入临时书", st == 200 and tmp_id, str(st) + str(b[:80]))
+    st, _, b = call("/api/books/%s/ch/0" % tmp_id, token=tok_a)
+    check("临时书有章节", st == 200 and len(j(b).get("paras") or []) > 0, str(st))
+    st, _, b = call("/api/books/delete", "POST", {"ids": [tmp_id, 999999]}, token=tok_b)
+    check("B 删 A 的书 → deleted:0", j(b).get("deleted") == 0, str(b[:80]))
+    check("B 删完 A 的书还在", call("/api/books/%s" % tmp_id, token=tok_a)[0] == 200)
+    st, _, b = call("/api/books/delete", "POST", {"ids": [tmp_id, 999999]}, token=tok_a)
+    check("A 批量删除 → 只删自己的 1 本", j(b).get("deleted") == 1, str(b[:80]))
+    check("删后书 404", call("/api/books/%s" % tmp_id, token=tok_a)[0] == 404)
+    ch_left = sqlite3.connect(os.path.join(TMP, "reader.db")).execute(
+        "SELECT COUNT(*) FROM chapters WHERE book_id=?", (tmp_id,)).fetchone()[0]
+    check("章节级联删除干净", ch_left == 0, "剩 %d" % ch_left)
+    check("删空 id 列表 → 400", call("/api/books/delete", "POST", {"ids": []}, token=tok_a)[0] == 400)
+
+    print("G. 线上 8848 鉴权闸门")
     st, h, b = call("/", base=LIVE)
     check("/ 未登录 → 跳登录", st in (200, 303) and ("login" in (h.get("location") or "") or b"authForm" in b), str(st))
     check("/login → 200", call("/login", base=LIVE)[0] == 200)
