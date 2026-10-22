@@ -710,11 +710,24 @@ function evalHtmlRule(rule, ctx) {
 /* ------------------------------------------------------------------ *
  *  规则集执行（search / bookInfo / toc / content）
  * ------------------------------------------------------------------ */
+/** Legado 的书源 header 常用单引号/尾逗号（GSON 宽容模式），JSON.parse 会直接失败 */
+function lenientJson(s) {
+  const t = String(s)
+    .replace(/\/\/[^\n\r]*/g, '')                                   // 行注释
+    .replace(/'((?:[^'\\]|\\.)*)'/g, (m, inner) => JSON.stringify(inner.replace(/\\'/g, "'")))
+    .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)(\s*:)/g, '$1"$2"$3')     // 裸键名
+    .replace(/,\s*([}\]])/g, '$1');                                 // 尾逗号
+  return JSON.parse(t);
+}
+
 function parseHeader(src) {
   const h = src.header;
   if (!h) return {};
   try {
-    const obj = typeof h === 'string' ? JSON.parse(h) : h;
+    let obj;
+    if (typeof h === 'string') {
+      try { obj = JSON.parse(h); } catch { obj = lenientJson(h); }
+    } else obj = h;
     const out = {};
     for (const [k, v] of Object.entries(obj || {})) {
       if (k.toLowerCase() === 'cookie') continue; // cookie 单独处理
