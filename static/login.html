@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>登录 · TTSNover</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body.auth-page{display:flex;align-items:center;justify-content:center;min-height:100dvh;padding:24px;}
+  .auth-card{width:100%;max-width:380px;padding:28px 24px 22px;border-radius:20px;
+    background:rgba(22,27,38,.86);border:1px solid rgba(127,127,127,.18);
+    box-shadow:0 18px 50px rgba(0,0,0,.45);backdrop-filter:blur(18px);}
+  .auth-field input::placeholder{color:rgba(200,210,225,.42);}
+  .auth-brand{display:flex;align-items:center;gap:10px;margin-bottom:6px;}
+  .auth-brand h1{font-size:20px;margin:0;letter-spacing:.02em;}
+  .auth-sub{margin:0 0 20px;font-size:13px;opacity:.6;}
+  .auth-tabs{display:flex;gap:6px;background:rgba(127,127,127,.12);padding:4px;border-radius:12px;margin-bottom:18px;}
+  .auth-tabs button{flex:1;border:0;background:transparent;color:inherit;font-size:14px;padding:9px 0;border-radius:9px;cursor:pointer;opacity:.65;}
+  .auth-tabs button.on{background:rgba(127,127,127,.22);opacity:1;font-weight:600;}
+  .auth-field{margin-bottom:14px;}
+  .auth-field label{display:block;font-size:12px;opacity:.6;margin-bottom:6px;}
+  .auth-field input{width:100%;box-sizing:border-box;padding:12px 13px;border-radius:11px;border:1px solid rgba(127,127,127,.28);background:rgba(127,127,127,.08);color:inherit;font-size:15px;outline:none;}
+  .auth-field input:focus{border-color:rgba(120,170,255,.65);}
+  .auth-btn{width:100%;padding:12px;border:0;border-radius:11px;font-size:15px;font-weight:600;cursor:pointer;background:#3b82f6;color:#fff;margin-top:6px;}
+  .auth-btn:disabled{opacity:.6;cursor:default;}
+  .auth-msg{min-height:18px;font-size:12.5px;margin:12px 2px 0;line-height:1.5;}
+  .auth-msg.err{color:#f87171;}
+  .auth-msg.ok{color:#4ade80;}
+  .auth-foot{margin-top:16px;font-size:11.5px;opacity:.45;line-height:1.6;text-align:center;}
+</style>
+</head>
+<body data-theme="dark" class="auth-page">
+
+<form class="auth-card glass" id="authForm" autocomplete="on">
+  <div class="auth-brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+    <h1>TTSNover</h1>
+  </div>
+  <p class="auth-sub" id="authSub">登录后继续读你的书</p>
+
+  <div class="auth-tabs">
+    <button type="button" id="tabLogin" class="on">登录</button>
+    <button type="button" id="tabRegister">注册</button>
+  </div>
+
+  <div class="auth-field">
+    <label for="username">用户名</label>
+    <input id="username" name="username" type="text" autocomplete="username"
+           placeholder="2-32 位，中文/字母/数字" required>
+  </div>
+  <div class="auth-field">
+    <label for="password">密码</label>
+    <input id="password" name="password" type="password" autocomplete="current-password"
+           placeholder="至少 8 位" required>
+  </div>
+
+  <button class="auth-btn" id="authSubmit" type="submit">登录</button>
+  <p class="auth-msg" id="authMsg"></p>
+  <p class="auth-foot">每人一套独立的书架、书源、阅读进度与 API Key。<br>Key 只存服务端加密库，前端只能看到掩码。</p>
+</form>
+
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const next = params.get('next') || '/';
+  let mode = 'login';
+
+  const $ = (s) => document.querySelector(s);
+  const msg = $('#authMsg');
+
+  function setMode(m) {
+    mode = m;
+    const login = m === 'login';
+    $('#tabLogin').classList.toggle('on', login);
+    $('#tabRegister').classList.toggle('on', !login);
+    $('#authSubmit').textContent = login ? '登录' : '注册并登录';
+    $('#authSub').textContent = login ? '登录后继续读你的书' : '开放注册：填个名字和密码就能用';
+    $('#password').setAttribute('autocomplete', login ? 'current-password' : 'new-password');
+    msg.textContent = '';
+    msg.className = 'auth-msg';
+  }
+
+  $('#tabLogin').onclick = () => setMode('login');
+  $('#tabRegister').onclick = () => setMode('register');
+
+  function say(text, kind) {
+    msg.textContent = text;
+    msg.className = 'auth-msg ' + (kind || '');
+  }
+
+  $('#authForm').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const username = $('#username').value.trim();
+    const password = $('#password').value;
+    if (!username || !password) return say('用户名和密码都要填', 'err');
+    const btn = $('#authSubmit');
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/auth/' + (mode === 'login' ? 'login' : 'register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        say(j.error || ('失败：HTTP ' + r.status), 'err');
+        btn.disabled = false;
+        return;
+      }
+      const c = j.claimed || null;
+      if (c && (c.books || c.sources)) {
+        say('注册成功，已把你原有的 ' + (c.books || 0) + ' 本书、' + (c.sources || 0) + ' 个书源迁到本账号，正在进入…', 'ok');
+      } else {
+        say('成功，正在进入…', 'ok');
+      }
+      location.replace(next);
+    } catch (e) {
+      say('网络错误：' + e.message, 'err');
+      btn.disabled = false;
+    }
+  });
+
+  // 已经登录过就直接进书架
+  fetch('/api/auth/me', { headers: { 'Accept': 'application/json' } })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => { if (j && j.user) location.replace(next); })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>

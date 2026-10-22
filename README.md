@@ -1,10 +1,35 @@
 # 网页版阅读器（Legado 风格）
 
-纯 Python 标准库 + 原生 JS，无框架、无构建、无第三方依赖。
+FastAPI + 原生 JS（无构建步骤、无前端框架）。**多用户**：开放注册，每人一套独立的书架、书源、进度、设置和 API Key。
 
 - 服务：`http://0.0.0.0:8848/`（systemd 用户服务 `webreader.service`，开机自启）
+- 首次访问会跳到 `/login`：**第一个注册的账号自动接管原有数据**（书架/书源/缓存/小米 key），之后注册的账号从空数据开始
 - 局域网：手机同 WiFi 打开 `http://192.168.2.108:8848/`
-- 数据：`data/reader.db`（SQLite）+ `data/tts/`（合成音频缓存）
+- 数据：`data/reader.db`（SQLite，全部表带 `user_id`）+ `data/tts/<user_id>/`（每人独立音频缓存）+ `data/secret.key`（API Key 加密主密钥）
+
+### 多用户与鉴权
+
+| 项 | 做法 |
+|---|---|
+| 注册 | 开放注册，无管理员/普通用户之分；用户名 2–32 位，密码 ≥8 位 |
+| 密码 | `hashlib.scrypt`（n=2^14, r=8, p=1）+ 每用户随机 salt |
+| 会话 | 30 天；库里只存 `sha256(token)`，明文 token 只在客户端 |
+| Web 登录 | `HttpOnly` + `SameSite=Lax` Cookie（HTTPS 下自动加 `Secure`） |
+| App 登录 | `Authorization: Bearer <token>`，与 Cookie 共用同一张 `tokens` 表 |
+| 隔离 | `books` / `settings(user_id,k)` / `sources(user_id,id)` / `user_keys` / TTS 缓存与克隆样本目录全部按用户 |
+| API Key | 每人自己的 Fish / 小米 key，AES-GCM 加密存 `user_keys`；接口只回 `has` + 掩码（`sk-****3f9a`），明文永不回前端 |
+| 限流 | 登录/注册 5 次/分钟/IP；TTS 120 次/分钟/用户；搜书全服同时 2 个任务，单任务最多 `SEARCH_CONC`（默认 10）个 node 子进程 |
+
+环境变量（`systemd` 里已配）：`WEBREADER_DATA`（数据目录，默认 `./data`）、`WEBREADER_DB`（单独指定库文件）、`AUTH_ENFORCE=1`、`SEARCH_CONC`、`SEARCH_MAX`、`TTS_PER_MIN`、`WEBREADER_MASTER_KEY`（base64 32 字节，优先于 `data/secret.key`）。
+
+### 从单用户库升级
+
+```bash
+cp data/reader.db data/reader.db.bak-$(date +%Y%m%d-%H%M%S)
+python3 tools/migrate_multiuser.py --db data/reader.db   # 单事务，失败整体回滚
+systemctl --user restart webreader
+# 然后浏览器打开 8848，第一个注册的账号会认领老数据
+```
 
 ## 已经能用的功能
 
@@ -119,17 +144,38 @@ journalctl --user -u webreader -f      # 看日志
 
 ```
 webreader/
-├── server.py            # HTTP 服务 + 路由（标准库）
-├── booklib.py           # TXT/EPUB 解析、章节切分、SQLite
-├── tts.py               # TTS 模板渲染 + 代理转发 + 缓存 + 预设
+├── app.py               # FastAPI 入口：路由 + 鉴权中间件 + 限流（唯一入口）
+├── auth.py              # 账号/会话：scrypt 密码、tokens 表、双通道校验
+├── keys.py              # 每用户 API Key 的 AES-GCM 加解密
+├── claim.py             # 第一个账号认领历史数据
+├── paths.py             # WEBREADER_DATA / WEBREADER_DB 路径解析
+├── booklib.py           # TXT/EPUB 解析、章节切分、SQLite（全部按 user_id）
+├── tts.py               # TTS 模板渲染 + 代理转发 + 按用户缓存 + 预设
 ├── sources.py           # 书源入库/启停 + 调 Node 引擎 + 加入书架 + 正文按需抓取
 ├── srce/                # Node 规则引擎（engine.js / cli.js，依赖 cheerio）
+├── tools/migrate_multiuser.py  # 单用户库 → 多用户库迁移（备份 + 事务）
 ├── tools/src_health.py  # 书源体检，自动停用死源
-├── tools/seed_tts.py    # 把已有 Fish Audio key 灌进设置
-├── static/{index.html,app.js,style.css}
+├── static/{index.html,login.html,app.js,style.css}
+├── requirements.txt     # fastapi / uvicorn / cryptography
 ├── sample/测试书.txt     # 演示用
-└── data/                # 运行时生成
+└── data/                # 运行时生成（不进 Git）
 ```
+
+> 旧的标准库版 `server.py` 已删除（多用户前无鉴权，留着容易被误启动），需要时从 Git 历史 `git show af1790e:server.py` 取。
+
+## 云服务器 / App 部署
+
+1. 装依赖：`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+2. 数据搬家：`WEBREADER_DATA=/var/lib/webreader`，把 `data/` 内容拷过去
+3. **必须上 HTTPS**（否则密码/token 明文过网）：Caddy 两行搞定，Cookie 会自动带 `Secure`
+   ```
+   your.domain.com {
+       reverse_proxy 127.0.0.1:8848
+   }
+   ```
+4. systemd 用 `app.py` 的启动方式：`.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8848`（前面有 Caddy 时只监听 127.0.0.1）
+5. App 端：`POST /api/auth/login` 拿 `token`，之后所有请求带 `Authorization: Bearer <token>`；接口文档 `GET /api/docs`
+6. 容量参考：2 核 2 GB 能跑（搜书并发已限到 `SEARCH_CONC=10`，峰值约 700 MB）；宽裕用 2 核 4 GB + 20 GB 盘
 
 ## 还没做的（和原 App 的差距）
 

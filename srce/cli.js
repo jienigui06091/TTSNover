@@ -75,7 +75,18 @@ async function cmdSearch(job) {
     child.stdin.end(JSON.stringify({ cmd: 'search', key, page, sources: [src] }));
   });
 
-  const results = await Promise.all(srcs.map(one));
+  // 并发上限：每个源一个 node 子进程（约 70MB），全开会把小内存云服务器打死。
+  // SEARCH_CONC 默认 10（约 700MB 峰值），本机可调到 24。
+  const CONC = Math.max(1, parseInt(process.env.SEARCH_CONC || '10', 10));
+  const results = new Array(srcs.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < srcs.length) {
+      const idx = cursor++;
+      results[idx] = await one(srcs[idx]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONC, srcs.length) }, worker));
   return { results };
 }
 

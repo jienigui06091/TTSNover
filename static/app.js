@@ -40,7 +40,7 @@ let previewing = false;
 let chunks = [];            // 已拼接进正文的章节块（连续阅读）
 let prefetched = new Map(); // idx -> 已提前取回的章节数据
 let appending = false, endMarked = false;
-let presets = {}, mimoVoices = [], mimoReady = false;
+let presets = {}, mimoVoices = [], mimoReady = false, mimoKeyMasked = '';
 let mimoModes = [], mimoClones = [], mimoDesignDefault = '', mimoCloneMax = 7 * 1024 * 1024;
 let saveTimer = null;
 let shelfBooksList = [];    // 书架本地缓存列表，用于即时搜索过滤
@@ -52,6 +52,12 @@ let curSrcList = [];        // 当前渲染出来的列表（受筛选影响）
 /* ---------------- 基础工具函数 ---------------- */
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
+  if (r.status === 401) {
+    // 会话过期/未登录：整页跳登录，别让界面卡在空数据上
+    const back = encodeURIComponent(location.pathname + location.search);
+    location.replace('/login?next=' + back);
+    throw new Error('请先登录');
+  }
   const ct = r.headers.get('content-type') || '';
   if (ct.includes('application/json')) {
     const j = await r.json();
@@ -1033,8 +1039,8 @@ function fillMimoForm() {
   fillCloneList();
   $('#mimoStyle').value = S.tts.style || '';
   $('#mimoKeyState').textContent = mimoReady
-    ? '✓ 服务端已配置 Key（存 data/mimo.key，前端拿不到、不进 Git）'
-    : '⚠ 服务端还没有 Key：粘贴到上面输入框，点「保存」写入';
+    ? ('✓ 已配置你的 Key' + (mimoKeyMasked ? '：' + mimoKeyMasked : '') + '（加密存服务端，前端只显示掩码）')
+    : '⚠ 还没配置你的 Key：粘贴到上面输入框，点「保存」写入（只有你能用）';
 }
 
 /* 克隆样本下拉：只有名字 + 大小，音频本身留在服务端 */
@@ -1865,7 +1871,8 @@ function bind() {
           const r = await api('/api/tts/key', { method: 'POST', body: JSON.stringify({ key: k }) });
           mimoReady = !!r.ready;
           $('#mimoKeyInput').value = '';
-          $('#mimoKeyState').textContent = '✓ 服务端已配置 Key（存 data/mimo.key，前端拿不到、不进 Git）';
+          mimoKeyMasked = r.masked || '';
+          $('#mimoKeyState').textContent = '✓ 已配置你的 Key' + (mimoKeyMasked ? '：' + mimoKeyMasked : '');
           toast('小米 Key 已写入服务端', 'ok');
         } catch (e) {
           toast('Key 保存失败：' + e.message, 'err', 4000);
@@ -2035,9 +2042,29 @@ function bind() {
   });
 }
 
+/* 顶栏账号：显示首字，点击退出 */
+async function loadMe() {
+  try {
+    const me = await api('/api/auth/me');
+    const name = (me && me.user && me.user.username) || '';
+    if (!name) return;
+    const av = $('#userAvatar');
+    if (av) av.textContent = name.slice(0, 1).toUpperCase();
+    const b = $('#btnUser');
+    if (!b) return;
+    b.title = '当前账号：' + name + '（点击退出登录）';
+    b.onclick = async () => {
+      if (!confirm('退出登录？')) return;
+      try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { }
+      location.replace('/login');
+    };
+  } catch (e) { }
+}
+
 /* ---------------- 初始化运行 ---------------- */
 (async function init() {
   bind();
+  await loadMe();
   await loadSettings();
   applyPageMode();
   try {
@@ -2045,6 +2072,7 @@ function bind() {
     presets = p.presets || {};
     mimoVoices = p.mimo_voices || [];
     mimoReady = !!p.mimo_ready;
+    mimoKeyMasked = p.mimo_key_masked || '';
     mimoModes = p.mimo_modes || [];
     mimoClones = p.mimo_clones || [];
     mimoDesignDefault = p.mimo_design_default || '';

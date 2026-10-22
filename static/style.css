@@ -2117,3 +2117,11 @@ body[data-theme="green"] .setting-group {
     font-size: 13px;
   }
 }
+
+/* 顶栏账号头像（多用户） */
+.avatar{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:22px;height:22px;border-radius:50%;
+  background:linear-gradient(135deg,rgba(120,170,255,.9),rgba(90,120,240,.75));
+  color:#fff;font-size:12px;font-weight:700;line-height:1;
+}

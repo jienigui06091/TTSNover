@@ -13,13 +13,15 @@ import json
 import os
 import shutil
 import time
+import threading
 import traceback
+from collections import deque
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -85,8 +87,15 @@ async def on_http_error(request: Request, exc: StarletteHTTPException):
 
 
 # ---------------- 鉴权 ----------------
-AUTH_ENFORCE = os.environ.get("AUTH_ENFORCE", "1").lower() not in ("0", "false", "no")
+AUTH_ENFORCE = os.environ.get("AUTH_ENFORCE", "1") not in ("0", "false", "no")
+# 并发闸门：搜书一个任务最多起 SEARCH_CONC 个 node 子进程，全服最多同时跑 2 个搜索
+SEARCH_MAX = int(os.environ.get("SEARCH_MAX", "2"))
+SEARCH_SEM = threading.Semaphore(SEARCH_MAX)
+TTS_PER_MIN = int(os.environ.get("TTS_PER_MIN", "120"))
+_tts_hits = {}
+_tts_lock = threading.Lock()
 PUBLIC_PREFIX = ("/static/", "/api/auth/", "/api/docs", "/api/openapi.json")
+PUBLIC_EXACT = ("/login", "/favicon.ico")
 
 
 def token_from(request: Request) -> str:
@@ -120,8 +129,11 @@ async def auth_gate(request: Request, call_next):
     if user:
         request.state.user = user
         request.state.token = raw
-    if user or path == "/" or path.startswith(PUBLIC_PREFIX):
+    if user or path in PUBLIC_EXACT or path.startswith(PUBLIC_PREFIX):
         return await call_next(request)
+    if path == "/" and AUTH_ENFORCE:
+        # 未登录访问书架：直接送登录页，别先加载一个必然 401 的页面
+        return RedirectResponse("/login?next=/", status_code=303)
     if not AUTH_ENFORCE:
         # 开发期兜底：未登录时按首个账号处理（AUTH_ENFORCE=0 才生效）
         u = auth.first_user()
@@ -196,6 +208,13 @@ def uid_of(request: Request) -> int:
 
 
 # ---------------- 静态页面 ----------------
+@app.get("/login", include_in_schema=False)
+def login_page():
+    return FileResponse(os.path.join(STATIC, "login.html"),
+                        media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/", include_in_schema=False)
 def index():
     return FileResponse(
@@ -410,9 +429,14 @@ def api_src_search(request: Request, q: str = "", page: int = 1,
     if not kw:
         return jerr("缺少关键词")
     ids = [x for x in sources_.split(",") if x] if sources_ else None
-    t0 = time.time()
-    res, stat = sources.search(uid_of(request), kw, ids, page)
-    stat["ms"] = int((time.time() - t0) * 1000)
+    if not SEARCH_SEM.acquire(blocking=False):
+        return jerr("服务器正在处理别人的搜索，请等几秒再试", 429)
+    try:
+        t0 = time.time()
+        res, stat = sources.search(uid_of(request), kw, ids, page)
+        stat["ms"] = int((time.time() - t0) * 1000)
+    finally:
+        SEARCH_SEM.release()
     return {"key": kw, "results": res, "stats": stat}
 
 
@@ -468,6 +492,20 @@ def _tts_cfg(uid, d):
     return cfg
 
 
+def tts_quota_ok(uid, limit=None):
+    """每用户每分钟合成次数上限（防止一个账号把 CPU/上游额度刷爆）。"""
+    limit = limit or TTS_PER_MIN
+    now = time.time()
+    with _tts_lock:
+        q = _tts_hits.setdefault(int(uid), deque())
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= limit:
+            return False
+        q.append(now)
+        return True
+
+
 @app.post("/api/tts")
 async def api_tts(request: Request):
     d = await jbody(request)
@@ -475,6 +513,8 @@ async def api_tts(request: Request):
     if not text:
         return jerr("没有文本")
     uid = uid_of(request)
+    if not tts_quota_ok(uid):
+        return jerr("朗读请求太频繁（每分钟上限 %d 次），稍等一下" % TTS_PER_MIN, 429)
     cfg = _tts_cfg(uid, d)
     if cfg.get("engine") == "web":
         return jerr("浏览器语音由前端处理，不该请求这里")
@@ -492,6 +532,8 @@ async def api_tts(request: Request):
 async def api_tts_test(request: Request):
     d = await jbody(request)
     uid = uid_of(request)
+    if not tts_quota_ok(uid, 10):
+        return jerr("测试太频繁了，等一分钟再试", 429)
     cfg = _tts_cfg(uid, d)
     text = (d.get("text") or "你好，这是一次朗读测试。").strip()
     out = {"ok": False}
