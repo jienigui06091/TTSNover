@@ -130,21 +130,52 @@
       <button id="btnShelfSet" class="btn btn-icon ghost" title="阅读与朗读偏好设置">
         <svg class="svg-icon"><use href="#icon-settings"></use></svg>
       </button>
-      <button id="btnUser" class="btn btn-icon ghost" title="账号">
+      <button id="btnUser" class="btn btn-icon ghost" title="账号菜单">
         <span class="avatar" id="userAvatar">·</span>
       </button>
+    </div>
+
+    <!-- 用户账号浮层卡片 -->
+    <div id="userMenuPopover" class="user-menu-popover glass hide">
+      <div class="user-popover-header">
+        <div class="user-popover-avatar" id="popoverAvatar">·</div>
+        <div class="user-popover-meta">
+          <div class="user-popover-name" id="popoverUsername">用户</div>
+          <span class="user-popover-status">已登录 · 独立私密书架</span>
+        </div>
+      </div>
+      <div class="user-popover-menu">
+        <button class="user-popover-item" id="btnUserGoSet">
+          <svg class="svg-icon"><use href="#icon-settings"></use></svg>
+          <span>偏好设置 (排版 / 朗读)</span>
+        </button>
+        <button class="user-popover-item" id="btnUserGoSources">
+          <svg class="svg-icon"><use href="#icon-source"></use></svg>
+          <span>书源管理</span>
+        </button>
+        <div class="user-popover-divider"></div>
+        <button class="user-popover-item danger" id="btnLogout">
+          <svg class="svg-icon"><use href="#icon-close"></use></svg>
+          <span>退出当前账号</span>
+        </button>
+      </div>
     </div>
   </header>
 
   <input type="file" id="fileInput" accept=".txt,.epub,text/plain,application/epub+zip" multiple hidden>
 
   <div id="shelfBulkBar" class="src-bulkbar shelf-bulkbar glass hide">
-    <span id="shelfBulkInfo" class="hint">已选 0 本</span>
+    <div class="bulkbar-left">
+      <span class="bulk-pill-badge" id="shelfBulkInfo">已选 0 本</span>
+    </div>
     <div class="src-bulk-actions">
       <button class="btn ghost sm" id="btnShelfSelAll" title="选中当前可见的全部书籍">全选</button>
       <button class="btn ghost sm" id="btnShelfSelNone">清空</button>
-      <button class="btn danger sm" id="btnShelfDelSel">删除选中</button>
-      <button class="btn ghost sm" id="btnShelfMultiExit">退出</button>
+      <button class="btn danger sm" id="btnShelfDelSel" disabled>
+        <svg class="svg-icon"><use href="#icon-trash"></use></svg>
+        <span>删除选中</span>
+      </button>
+      <button class="btn ghost sm" id="btnShelfMultiExit">退出多选</button>
     </div>
   </div>
 
@@ -247,12 +278,17 @@
   </div>
   
   <div id="srcBulkBar" class="src-bulkbar glass hide">
-    <span id="srcBulkInfo" class="hint">已选 0 个</span>
+    <div class="bulkbar-left">
+      <span class="bulk-pill-badge" id="srcBulkInfo">已选 0 个</span>
+    </div>
     <div class="src-bulk-actions">
       <button class="btn ghost sm" id="btnSrcSelAll" title="选中当前筛选结果里的全部书源">全选</button>
       <button class="btn ghost sm" id="btnSrcSelNone">清空</button>
-      <button class="btn danger sm" id="btnSrcDelSel">删除选中</button>
-      <button class="btn ghost sm" id="btnSrcMultiExit">退出</button>
+      <button class="btn danger sm" id="btnSrcDelSel" disabled>
+        <svg class="svg-icon"><use href="#icon-trash"></use></svg>
+        <span>删除选中</span>
+      </button>
+      <button class="btn ghost sm" id="btnSrcMultiExit">退出多选</button>
     </div>
   </div>
 

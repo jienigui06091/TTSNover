@@ -2099,8 +2099,9 @@ function bind() {
   // 全局快捷键
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      closeDrawer(); closeSet(); setTtsPanel(false);
+      closeDrawer(); closeSet(); setTtsPanel(false); closeSrcAdd();
       $('#confirmModal').classList.add('hide');
+      const pop = $('#userMenuPopover'); if (pop) pop.classList.add('hide');
       return;
     }
     if ($('#reader').classList.contains('hide')) return;
@@ -2126,22 +2127,57 @@ function bind() {
   });
 }
 
-/* 顶栏账号：显示首字，点击退出 */
+/* 顶栏账号与气泡浮层菜单 */
 async function loadMe() {
   try {
     const me = await api('/api/auth/me');
     const name = (me && me.user && me.user.username) || '';
     if (!name) return;
+    const initial = name.slice(0, 1).toUpperCase();
     const av = $('#userAvatar');
-    if (av) av.textContent = name.slice(0, 1).toUpperCase();
+    if (av) av.textContent = initial;
+    const popAv = $('#popoverAvatar');
+    if (popAv) popAv.textContent = initial;
+    const popName = $('#popoverUsername');
+    if (popName) popName.textContent = name;
+
     const b = $('#btnUser');
-    if (!b) return;
-    b.title = '当前账号：' + name + '（点击退出登录）';
-    b.onclick = async () => {
-      if (!confirm('退出登录？')) return;
-      try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { }
-      location.replace('/login');
+    const pop = $('#userMenuPopover');
+    if (!b || !pop) return;
+
+    b.title = '当前账号：' + name;
+    b.onclick = (e) => {
+      e.stopPropagation();
+      pop.classList.toggle('hide');
     };
+
+    const goSet = $('#btnUserGoSet');
+    if (goSet) goSet.onclick = () => { pop.classList.add('hide'); openSet('read'); };
+
+    const goSrc = $('#btnUserGoSources');
+    if (goSrc) goSrc.onclick = () => { pop.classList.add('hide'); openSources(); };
+
+    const logout = $('#btnLogout');
+    if (logout) {
+      logout.onclick = () => {
+        pop.classList.add('hide');
+        showConfirm({
+          title: '退出登录',
+          msg: `确定要退出当前账号「${name}」吗？退出后需重新登录以访问个人书架。`,
+          okText: '退出登录',
+          onOk: async () => {
+            try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { }
+            location.replace('/login');
+          }
+        });
+      };
+    }
+
+    document.addEventListener('click', (e) => {
+      if (!pop.classList.contains('hide') && !pop.contains(e.target) && e.target !== b && !b.contains(e.target)) {
+        pop.classList.add('hide');
+      }
+    });
   } catch (e) { }
 }
 
