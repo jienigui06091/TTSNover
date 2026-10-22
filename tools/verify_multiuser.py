@@ -66,6 +66,32 @@ def j(b):
         return {}
 
 
+def snapshot(dst):
+    """WAL 库不能直接拷主文件（未 checkpoint 的写入会漏），用 backup API 取一致快照。"""
+    src = sqlite3.connect(os.path.join(ROOT, "data/reader.db"))
+    out = sqlite3.connect(dst)
+    src.backup(out)
+    out.close()
+    src.close()
+
+
+def reset_to_unclaimed(db):
+    """把库退回“没人注册过”的状态：清账号/令牌/Key，所有数据归 user_id=0。
+
+    线上库可能早已被首账号认领，也可能本来就是 0 —— 两种都要能跑，所以：
+    books 直接改 0；sources/settings 是复合主键 (user_id, id)，用 OR REPLACE 让
+    主键冲突的旧 user_id=0 行让位，绝不能先 DELETE user_id=0（那会把自己删空）。
+    """
+    c = sqlite3.connect(db)
+    for t in ("tokens", "user_keys", "users"):
+        c.execute("DELETE FROM %s" % t)
+    c.execute("UPDATE books SET user_id=0")
+    for t in ("sources", "settings"):
+        c.execute("UPDATE OR REPLACE %s SET user_id=0" % t)
+    c.commit()
+    c.close()
+
+
 def setup():
     """拷真库 → 退回“未认领”状态（清账号、数据归 user_id=0）→ 迁移 → 假 key + 缓存样本。
 
@@ -74,23 +100,8 @@ def setup():
     shutil.rmtree(TMP, ignore_errors=True)
     os.makedirs(os.path.join(TMP, "tts"))
     db = os.path.join(TMP, "reader.db")
-    # WAL 库不能直接拷主文件（还没 checkpoint 的写入会漏），用 backup API 取一致快照
-    _src = sqlite3.connect(os.path.join(ROOT, "data/reader.db"))
-    _dst = sqlite3.connect(db)
-    _src.backup(_dst)
-    _dst.close()
-    _src.close()
-    c = sqlite3.connect(db)
-    for t in ("tokens", "user_keys", "users"):
-        c.execute("DELETE FROM %s" % t)
-    # settings/sources 是复合主键 (user_id, id)，用 OR REPLACE 让冲突的旧 user_id=0 行让位；
-    # 不能先 DELETE user_id=0 —— 线上库重置后本来就全是 0，会把自己删空。
-    for t in ("books",):
-        c.execute("UPDATE %s SET user_id=0" % t)
-    for t in ("sources", "settings"):
-        c.execute("UPDATE OR REPLACE %s SET user_id=0" % t)
-    c.commit()
-    c.close()
+    snapshot(db)
+    reset_to_unclaimed(db)
     bins = []
     for d, _, fs in os.walk(os.path.join(ROOT, "data/tts")):
         bins += [os.path.join(d, f) for f in fs if f.endswith(".bin")]
