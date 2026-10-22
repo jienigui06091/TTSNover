@@ -74,7 +74,12 @@ def setup():
     shutil.rmtree(TMP, ignore_errors=True)
     os.makedirs(os.path.join(TMP, "tts"))
     db = os.path.join(TMP, "reader.db")
-    shutil.copy(os.path.join(ROOT, "data/reader.db"), db)
+    # WAL 库不能直接拷主文件（还没 checkpoint 的写入会漏），用 backup API 取一致快照
+    _src = sqlite3.connect(os.path.join(ROOT, "data/reader.db"))
+    _dst = sqlite3.connect(db)
+    _src.backup(_dst)
+    _dst.close()
+    _src.close()
     c = sqlite3.connect(db)
     for t in ("tokens", "user_keys", "users", "settings", "sources"):
         c.execute("DELETE FROM %s WHERE user_id=0" % t if t in ("settings", "sources")
