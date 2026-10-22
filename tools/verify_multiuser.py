@@ -92,6 +92,14 @@ def reset_to_unclaimed(db):
     c.close()
 
 
+def import_txt(tok, name="自检用书.txt"):
+    """造一本两章的 TXT 进书架，返回新书 id。线上书架被清空时靠它兜底。"""
+    body = ("第一章 甲\n" + "正文甲。" * 40 + "\n\n第二章 乙\n" + "正文乙。" * 40 + "\n")
+    st, _, b = call("/api/import?filename=" + urllib.parse.quote(name), "POST",
+                    raw=body.encode(), ctype="text/plain", token=tok)
+    return j(b).get("id")
+
+
 def setup():
     """拷真库 → 退回“未认领”状态（清账号、数据归 user_id=0）→ 迁移 → 假 key + 缓存样本。
 
@@ -179,6 +187,19 @@ def main():
     check("A 有 %d 源 / B 无源" % meta["sources"],
           len(srcs_a) == meta["sources"] and len(j(b).get("sources") or []) == 0,
           "%d/%d" % (len(srcs_a), len(j(b).get("sources") or [])))
+    # 线上书架可能被用户清空 / 书源被删光，缺什么就自己造一份，脚本才能反复跑
+    tmp_guard = None
+    if not books_a:
+        tmp_guard = import_txt(tok_a)
+        books_a = j(call("/api/books", token=tok_a)[2]).get("books") or []
+        check("书架为空时自动导入一本", bool(tmp_guard) and bool(books_a), str(tmp_guard))
+    if not srcs_a:
+        call("/api/sources/import", "POST",
+             raw=json.dumps([{"bookSourceName": "自检源", "bookSourceUrl": "https://x.test"}],
+                            ensure_ascii=False).encode(), token=tok_a)
+        srcs_a = j(call("/api/sources", token=tok_a)[2]).get("sources") or []
+        check("书源为空时自动导入一个", bool(srcs_a), str(len(srcs_a)))
+    n_srcs = len(srcs_a)
     bid = books_a[0]["id"]
     sid = srcs_a[0]["id"]
     check("B 读 A 的书 → 404", call("/api/books/%d" % bid, token=tok_b)[0] == 404)
@@ -193,14 +214,11 @@ def main():
     txt = next((x for x in books_a if x.get("fmt") != "src"), None)
     tmp_c = None
     if not txt:
-        # 线上书可能全是书源书（用户把 TXT 删了），这里自己造一本，别让脚本靠数据形状
-        body = ("第一章 甲\n" + "正文甲。" * 40 + "\n\n第二章 乙\n" + "正文乙。" * 40 + "\n")
-        st, _, b = call("/api/import?filename=" + urllib.parse.quote("自检用书.txt"), "POST",
-                        raw=body.encode(), ctype="text/plain", token=tok_a)
-        tmp_c = j(b).get("id")
+        # 线上书可能全是书源书，这里自己造一本，别让脚本靠数据形状
+        tmp_c = import_txt(tok_a)
         books_a = j(call("/api/books", token=tok_a)[2]).get("books") or []
         txt = next((x for x in books_a if x["id"] == tmp_c), None)
-        check("线上无 TXT 书时自动导入一本", bool(tmp_c) and txt is not None, str(b[:80]))
+        check("线上无 TXT 书时自动导入一本", bool(tmp_c) and txt is not None, str(tmp_c))
     st, _, b = call("/api/books/%d" % txt["id"], token=tok_a)
     check("书详情", st == 200 and j(b).get("title") == txt["title"], str(st))
     st, _, b = call("/api/books/%d/ch/0" % txt["id"], token=tok_a)
@@ -220,15 +238,15 @@ def main():
     if src:
         st, _, b = call("/api/books/%d/ch/0" % src["id"], token=tok_a)
         check("书源书章节（允许上游失败）", st in (200, 404), str(st))
-    if tmp_c:
-        call("/api/books/%d" % tmp_c, "DELETE", token=tok_a)
+    for tid in [x for x in (tmp_c, tmp_guard) if x]:
+        call("/api/books/%d" % tid, "DELETE", token=tok_a)
 
     print("D. 书源增删改 + 导入导出")
     st, h, b = call("/api/sources/export?only=0", token=tok_a)
     hd = {k.lower(): v for k, v in h.items()}
     check("导出带 attachment", st == 200 and "attachment" in (hd.get("content-disposition") or ""),
           str(hd)[:100])
-    check("导出是数组", isinstance(j(b), list) and len(j(b)) == meta["sources"],
+    check("导出是数组", isinstance(j(b), list) and len(j(b)) == n_srcs,
           str(len(j(b)) if isinstance(j(b), list) else b[:60]))
     st, _, b = call("/api/sources/import", "POST",
                     raw=json.dumps([{"bookSourceName": "临时源", "bookSourceUrl": "https://x.test"}],
@@ -239,8 +257,8 @@ def main():
     st, _, b = call("/api/sources/delete", "POST", {"ids": ids}, token=tok_b)
     check("B 批量删除自己的源", j(b).get("deleted") == 1, str(b[:120]))
     st, _, b = call("/api/sources", token=tok_a)
-    check("A 的 %d 源没被动" % meta["sources"],
-          len(j(b).get("sources") or []) == meta["sources"],
+    check("A 的 %d 源没被动" % n_srcs,
+          len(j(b).get("sources") or []) == n_srcs,
           str(len(j(b).get("sources") or [])))
 
     print("E. 设置 / Key / TTS 配额")
@@ -290,13 +308,14 @@ def main():
     check("/api/version 带 api 版本号", d.get("api") == 1, str(d))
 
     # 线上书架可能只剩 1 本，先造 3 本再测分页，结果才不依赖真实数据
+    base_total = len(j(call("/api/books", token=tok_a)[2]).get("books") or [])
     made = []
     for i in range(3):
         body = ("第一章 甲\n" + "正文甲。" * 30 + "\n\n第二章 乙\n" + "正文乙。" * 30 + "\n")
         st, _, b = call("/api/import?filename=" + urllib.parse.quote("分页书%d.txt" % i), "POST",
                         raw=body.encode(), ctype="text/plain", token=tok_a)
         made.append(j(b).get("id"))
-    total_now = meta["books"] + 3
+    total_now = base_total + 3
     st, _, b = call("/api/books?limit=2&offset=0", token=tok_a)
     d = j(b)
     check("书架分页 limit=2 → 2 本", len(d.get("books") or []) == 2, str(len(d.get("books") or [])))
