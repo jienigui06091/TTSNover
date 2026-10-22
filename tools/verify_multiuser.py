@@ -67,12 +67,28 @@ def j(b):
 
 
 def setup():
+    """拷真库 → 退回“未认领”状态（清账号、数据归 user_id=0）→ 迁移 → 假 key + 缓存样本。
+
+    线上库可能早就被首账号认领过了，所以这里主动重置，脚本才能反复跑。
+    """
     shutil.rmtree(TMP, ignore_errors=True)
     os.makedirs(os.path.join(TMP, "tts"))
-    shutil.copy(os.path.join(ROOT, "data/reader.db"), os.path.join(TMP, "reader.db"))
-    bins = [f for f in os.listdir(os.path.join(ROOT, "data/tts")) if f.endswith(".bin")][:20]
+    db = os.path.join(TMP, "reader.db")
+    shutil.copy(os.path.join(ROOT, "data/reader.db"), db)
+    c = sqlite3.connect(db)
+    for t in ("tokens", "user_keys", "users", "settings", "sources"):
+        c.execute("DELETE FROM %s WHERE user_id=0" % t if t in ("settings", "sources")
+                  else "DELETE FROM %s" % t)
+    for t in ("books", "sources", "settings"):
+        c.execute("UPDATE %s SET user_id=0" % t)
+    c.commit()
+    c.close()
+    bins = []
+    for d, _, fs in os.walk(os.path.join(ROOT, "data/tts")):
+        bins += [os.path.join(d, f) for f in fs if f.endswith(".bin")]
+    bins = bins[:20]
     for f in bins:
-        shutil.copy(os.path.join(ROOT, "data/tts", f), os.path.join(TMP, "tts", f))
+        shutil.copy(f, os.path.join(TMP, "tts", os.path.basename(f)))
     with open(os.path.join(TMP, "mimo.key"), "w") as f:
         f.write("sk-fake-legacy-key-9999\n")
     os.chmod(os.path.join(TMP, "mimo.key"), 0o600)
