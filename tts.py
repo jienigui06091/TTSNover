@@ -347,20 +347,28 @@ def _save(uid, key, data, ctype):
 _SPEAK_RE = re.compile(r"[0-9A-Za-z\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
 
-def _proxy_of(cfg):
-    """这个请求该走哪个代理：设置里的 proxy 优先，没配就看环境变量。
+def _proxy_of(cfg, url=""):
+    """这个请求该走哪个代理 → (proxy, 来源)。设置里的 proxy 优先，没配就看环境变量。
 
     境外服务器访问小米/国内接口时，最省事的办法是给 systemd 加
     Environment=HTTPS_PROXY=http://国内代理:端口，不用改每个账号的设置。
+    给了 url 就顺带判 NO_PROXY：命中时 urllib 会静默绕过代理，
+    不提前判一次，「实际走的路」就会被记成代理，日志和 diag 都会误报。
     """
     p = (cfg.get("proxy") or "").strip()
-    if p:
-        return p, "cfg"
-    for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
-        v = (os.environ.get(k) or "").strip()
-        if v:
-            return v, "env:" + k
-    return "", ""
+    src = "cfg"
+    if not p:
+        src = ""
+        for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+            v = (os.environ.get(k) or "").strip()
+            if v:
+                p, src = v, "env:" + k
+                break
+    if p and url:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        if host and urllib.request.proxy_bypass(host):
+            return "", "no_proxy"
+    return p, src
 
 
 def _send(url, data, headers, method, cfg, timeout):
@@ -373,7 +381,7 @@ def _send(url, data, headers, method, cfg, timeout):
     注意：Request 必须每轮重建。urllib 走代理时会调 req.set_proxy() 改写 req.host，
     复用同一个对象会把第二次「直连」又打到刚才那个代理上。
     """
-    proxy, _src = _proxy_of(cfg)
+    proxy, _src = _proxy_of(cfg, url)
     plan = [proxy, ""] if proxy else [""]
     last = None
     for i, p in enumerate(plan):
@@ -489,8 +497,8 @@ def synthesize(uid, cfg, text, voice=None, speed=None, use_cache=True):
                        detail=str(e.reason))
     except Exception as e:
         raise TTSError(f"请求失败：{e}")
-    if used_proxy != _proxy_of(cfg)[0]:
-        print(f"[tts] 代理 {_proxy_of(cfg)[0]} 不可用，已改直连 {url}", flush=True)
+    if used_proxy != _proxy_of(cfg, url)[0]:
+        print(f"[tts] 代理 {_proxy_of(cfg, url)[0]} 不可用，已改直连 {url}", flush=True)
 
     if not audio:
         raise TTSError("上游返回了 0 字节音频", 200, "")
@@ -742,7 +750,7 @@ def diag(uid, cfg):
     url = (cfg.get("url") or "").strip()
     if is_mimo(cfg) and not url:
         url = (PRESETS.get("mimo") or {}).get("url") or "https://api.xiaomimimo.com/v1/chat/completions"
-    proxy, proxy_src = _proxy_of(cfg)
+    proxy, proxy_src = _proxy_of(cfg, url)
     out = {
         "provider": cfg.get("provider") or "",
         "engine": cfg.get("engine") or "",
@@ -770,6 +778,8 @@ def diag(uid, cfg):
 
     if proxy:
         out["tcp_note"] = "下面的 TCP 探测是直连（不经代理），用来判断裸网络能不能到"
+    elif proxy_src == "no_proxy":
+        out["note"] = "NO_PROXY 命中，这条请求按直连处理"
     seen = set()
     for fam, _t, _pr, _c, sa in infos:
         ip = sa[0]
