@@ -391,6 +391,17 @@ def synthesize(uid, cfg, text, voice=None, speed=None, use_cache=True):
     if not isinstance(headers, dict):
         raise TTSError("请求头必须是 JSON 对象")
 
+    # 预设里的占位符 "你的KEY" 换成这个用户自己存的 key：每人一份，明文不落库、不进日志。
+    # 没配置时给一句人话，别把 urllib 的 latin-1 编码异常直接抛给前端。
+    if any("你的KEY" in str(v) for v in headers.values()):
+        prov = str(cfg.get("provider") or "").strip()
+        ukey = keys.get_key(uid, prov) if prov else ""
+        if not ukey:
+            pname = (PRESETS.get(prov) or {}).get("name") or "这个朗读接口"
+            raise TTSError("%s 的 API Key 还没配置：在「朗读设置」里填入自己的 key（只存服务端）" % pname, 400)
+        headers = {hk: (str(hv).replace("你的KEY", ukey) if isinstance(hv, str) else hv)
+                   for hk, hv in headers.items()}
+
     data = None
     if method != "GET":
         body = render(cfg.get("body", "") or "", text, voice, speed)

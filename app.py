@@ -634,7 +634,9 @@ def _cfg_from_request(uid, d):
     cfg = dict(tts.PRESETS.get("fish", {}))
     cfg.pop("note", None)
     saved = (booklib.get_settings(uid) or {}).get("tts") or {}
-    cfg.update({k: v for k, v in saved.items() if v not in (None, "")})
+    # proxy 允许显式写空串 = 直连（否则没法给局域网/本机 TTS 关掉预设里的代理）
+    cfg.update({k: v for k, v in saved.items()
+                if v is not None and (v != "" or k == "proxy")})
     cfg.update({k: v for k, v in (d.get("cfg") or {}).items() if v is not None})
     prov = (d.get("provider") or "").strip()
     if prov:
