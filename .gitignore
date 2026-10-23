@@ -21,3 +21,4 @@ npm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+static/download/
