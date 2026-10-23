@@ -209,5 +209,6 @@ sudo systemctl restart webreader
 | 登录后立刻又回登录页 | 反代没传 `X-Forwarded-Proto: https`（Cookie 带了 `Secure` 但页面是 http），检查 Caddy 配置和 uvicorn 的 `--proxy-headers` |
 | 429 | 同 IP 5 次/分限流，等一分钟；`auth.rate_ok` 是进程内计数，重启清零 |
 | TTS 报网络错误 | 云服务器出网被拦（安全组/NAT），`curl -sI https://api.fish.audio` 验证 |
+| TTS 报「连不上上游 / 连不上小米接口」 | 先在网页或 `curl -H 'Authorization: Bearer {token}' 'https://域名/api/tts/diag?provider=mimo'` 看自检：`tcp` 里 `ok:false` 的那条路不通、`http.status` 401/405 说明网络其实通（只是没带 key）。境外服务器访问 `api.xiaomimimo.com` / `api.siliconflow.cn` 常超时，给 unit 加 `Environment=HTTPS_PROXY=http://国内代理:端口` 即可（代码会优先用设置里的 proxy，没配才读这个环境变量；代理挂了会自动退回直连）。**手机端不会直连厂商，这类错不要查手机网络** |
 | 502 | 后端没起来：`journalctl -u webreader -n 50`；常见是 `WEBREADER_DATA` 权限或 venv 路径不对 |
 | 内存飙高 | 搜书每个源一个 node 子进程（实测峰值约 78 MB），`SEARCH_CONC=10` 最坏约 780 MB。2 GB 机器降到 `SEARCH_CONC=6`，或把 `SEARCH_BUDGET` 收紧到 8 秒。另外别频繁点「重试失效源」——失效源留在冷却里（连续失败 2 次自动跳过）时，一轮要跑的源数会明显更少 |

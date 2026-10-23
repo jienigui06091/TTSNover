@@ -347,8 +347,24 @@ def _save(uid, key, data, ctype):
 _SPEAK_RE = re.compile(r"[0-9A-Za-z\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
 
+def _proxy_of(cfg):
+    """这个请求该走哪个代理：设置里的 proxy 优先，没配就看环境变量。
+
+    境外服务器访问小米/国内接口时，最省事的办法是给 systemd 加
+    Environment=HTTPS_PROXY=http://国内代理:端口，不用改每个账号的设置。
+    """
+    p = (cfg.get("proxy") or "").strip()
+    if p:
+        return p, "cfg"
+    for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        v = (os.environ.get(k) or "").strip()
+        if v:
+            return v, "env:" + k
+    return "", ""
+
+
 def _send(url, data, headers, method, cfg, timeout):
-    """按 cfg.proxy 发请求；代理连不上时自动退回直连。返回 (raw, content_type, 实际用的代理)。
+    """按代理发请求；代理连不上时自动退回直连。返回 (raw, content_type, 实际用的代理)。
 
     典型场景：设置里配了本机 127.0.0.1:7890 的代理，服务部署到别的机器后那台机器
     没有这个代理，直连其实通 —— 这时不该让用户看到「连不上上游」。
@@ -357,7 +373,7 @@ def _send(url, data, headers, method, cfg, timeout):
     注意：Request 必须每轮重建。urllib 走代理时会调 req.set_proxy() 改写 req.host，
     复用同一个对象会把第二次「直连」又打到刚才那个代理上。
     """
-    proxy = (cfg.get("proxy") or "").strip()
+    proxy, _src = _proxy_of(cfg)
     plan = [proxy, ""] if proxy else [""]
     last = None
     for i, p in enumerate(plan):
@@ -473,8 +489,8 @@ def synthesize(uid, cfg, text, voice=None, speed=None, use_cache=True):
                        detail=str(e.reason))
     except Exception as e:
         raise TTSError(f"请求失败：{e}")
-    if used_proxy != (cfg.get("proxy") or "").strip():
-        print(f"[tts] 代理 {cfg.get('proxy')} 不可用，已改直连 {url}", flush=True)
+    if used_proxy != _proxy_of(cfg)[0]:
+        print(f"[tts] 代理 {_proxy_of(cfg)[0]} 不可用，已改直连 {url}", flush=True)
 
     if not audio:
         raise TTSError("上游返回了 0 字节音频", 200, "")
@@ -726,12 +742,13 @@ def diag(uid, cfg):
     url = (cfg.get("url") or "").strip()
     if is_mimo(cfg) and not url:
         url = (PRESETS.get("mimo") or {}).get("url") or "https://api.xiaomimimo.com/v1/chat/completions"
-    proxy = (cfg.get("proxy") or "").strip()
+    proxy, proxy_src = _proxy_of(cfg)
     out = {
         "provider": cfg.get("provider") or "",
         "engine": cfg.get("engine") or "",
         "url": url,
         "proxy": proxy,
+        "proxy_from": proxy_src,
         "ips": [],
         "tcp": [],
         "http": None,
@@ -751,6 +768,8 @@ def diag(uid, cfg):
         out["error"] = "DNS 解析失败：%s" % (e,)
         return out
 
+    if proxy:
+        out["tcp_note"] = "下面的 TCP 探测是直连（不经代理），用来判断裸网络能不能到"
     seen = set()
     for fam, _t, _pr, _c, sa in infos:
         ip = sa[0]
