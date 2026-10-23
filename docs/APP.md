@@ -83,11 +83,16 @@
 | 用途 | 请求 | 备注 |
 | --- | --- | --- |
 | 合成 | `POST /api/tts` `{"text","voice",...}` | 返回 `audio/mpeg` 字节流，带 `X-Cache: hit/miss` |
+| 连通性自检 | `GET /api/tts/diag?provider=mimo` | 服务器 → 上游的 DNS/逐 IP TCP/HTTP 探测，`连不上上游` 时先看这里 |
 | 预设/音色 | `GET /api/presets` | 含 Fish 音色、小米预置/设计/克隆 |
 | 填 key | `POST /api/keys` `{"provider":"fish","key":"..."}` | 每用户自己的 key，AES-GCM 存库 |
 | 看 key | `GET /api/keys` | **只回 `has_key` + 掩码**，拿不到明文 |
 
 客户端要点：
+
+0. 报 `连不上上游 / 连不上小米接口` 时，先打 `GET /api/tts/diag?provider=xxx`：返回 `ips`（DNS 解析结果）、
+   `tcp`（每个 IP 的 connect 毫秒数，`ok:false` 就是那条路不通）、`http`（上游状态码，401/405 也算通）、
+   `error`（人话原因）。**手机端不会直连厂商，这类错一定是服务器出口问题**，不要去查手机网络。
 
 1. 一次请求可能 5–170 秒（上游慢），**读超时设 ≥300 秒**（Caddy 也是 300s）。
 2. 命中缓存是毫秒级返回，`X-Cache: hit` 可以拿来做「秒播」判断。

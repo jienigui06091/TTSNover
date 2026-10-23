@@ -14,6 +14,7 @@ import os
 import keys
 import paths
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -346,6 +347,58 @@ def _save(uid, key, data, ctype):
 _SPEAK_RE = re.compile(r"[0-9A-Za-z\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
 
+def _send(url, data, headers, method, cfg, timeout):
+    """按 cfg.proxy 发请求；代理连不上时自动退回直连。返回 (raw, content_type, 实际用的代理)。
+
+    典型场景：设置里配了本机 127.0.0.1:7890 的代理，服务部署到别的机器后那台机器
+    没有这个代理，直连其实通 —— 这时不该让用户看到「连不上上游」。
+    上游明确回了 HTTP 状态（HTTPError）就照原样抛，不换路，免得掩盖真实错误。
+
+    注意：Request 必须每轮重建。urllib 走代理时会调 req.set_proxy() 改写 req.host，
+    复用同一个对象会把第二次「直连」又打到刚才那个代理上。
+    """
+    proxy = (cfg.get("proxy") or "").strip()
+    plan = [proxy, ""] if proxy else [""]
+    last = None
+    for i, p in enumerate(plan):
+        handlers = [urllib.request.ProxyHandler({"http": p, "https": p} if p else {})]
+        opener = urllib.request.build_opener(*handlers)
+        req = urllib.request.Request(url, data=data, headers=dict(headers), method=method)
+        try:
+            with opener.open(req, timeout=timeout) as r:
+                return r.read(), r.headers.get("Content-Type", ""), p
+        except urllib.error.HTTPError as e:
+            setattr(e, "used_proxy", p)  # 让上层知道这次是走代理还是直连得到的应答
+            raise
+        except urllib.error.URLError as e:
+            last = e
+            if p and i == 0:
+                continue
+            raise
+        except Exception as e:
+            last = e
+            if p and i == 0:
+                continue
+            raise
+    raise last if last else TTSError("请求失败")
+
+
+def _unreachable_hint(url, reason):
+    """把「连不上」翻译成能动手的建议：出口问题 / 代理问题 / DNS 问题。"""
+    host = urllib.parse.urlparse(url).hostname or url
+    r = str(reason)
+    if "Name or service not known" in r or "Temporary failure in name resolution" in r:
+        return f"服务器解析不了 {host}（DNS 有问题）"
+    if "Network is unreachable" in r:
+        return f"服务器没有到 {host} 的可用路由（多半是 IPv6 优先但没 IPv6 出口）"
+    if "timed out" in r or "timeout" in r:
+        return f"服务器连 {host} 超时（境外服务器访问国内接口常见，给服务配 HTTPS_PROXY 走国内代理即可）"
+    if "Connection refused" in r:
+        return f"服务器到 {host} 的连接被拒绝（如果配了代理，检查代理还活着没）"
+    return f"服务器连不上 {host}"
+
+
+
 def clean_text(t):
     """朗读前的文本清洗：去零宽字符、合并省略号/破折号、压空白。"""
     t = str(t or "")
@@ -409,27 +462,19 @@ def synthesize(uid, cfg, text, voice=None, speed=None, use_cache=True):
         if "Content-Type" not in headers and "content-type" not in headers:
             headers["Content-Type"] = "application/json"
 
-    proxy = (cfg.get("proxy") or "").strip()
-    handlers = []
-    if proxy:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    else:
-        handlers.append(urllib.request.ProxyHandler({}))
-    opener = urllib.request.build_opener(*handlers)
-
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    t0 = time.time()
     try:
-        with opener.open(req, timeout=float(cfg.get("timeout") or 60)) as r:
-            audio = r.read()
-            ctype = r.headers.get("Content-Type", "")
+        audio, ctype, used_proxy = _send(url, data, headers, method, cfg,
+                                         float(cfg.get("timeout") or 60))
     except urllib.error.HTTPError as e:
         body = e.read()[:600].decode("utf-8", "replace")
         raise TTSError(f"上游返回 HTTP {e.code}", e.code, body)
     except urllib.error.URLError as e:
-        raise TTSError(f"连不上上游：{e.reason}（检查代理设置）", detail=str(e.reason))
+        raise TTSError(f"连不上上游：{e.reason}｜{_unreachable_hint(url, e.reason)}",
+                       detail=str(e.reason))
     except Exception as e:
         raise TTSError(f"请求失败：{e}")
+    if used_proxy != (cfg.get("proxy") or "").strip():
+        print(f"[tts] 代理 {cfg.get('proxy')} 不可用，已改直连 {url}", flush=True)
 
     if not audio:
         raise TTSError("上游返回了 0 字节音频", 200, "")
@@ -536,25 +581,17 @@ def synthesize_mimo(uid, cfg, text, voice=None, use_cache=True):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key_api}
 
-    proxy = (cfg.get("proxy") or "").strip()
-    handlers = []
-    if proxy:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-    else:
-        handlers.append(urllib.request.ProxyHandler({}))
-    opener = urllib.request.build_opener(*handlers)
-
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     # 克隆模式上游排队很飘（实测 3s ~ 170s），给足超时，别把正常请求判成失败
     default_timeout = 240 if mode == "clone" else 120
     try:
-        with opener.open(req, timeout=float(cfg.get("timeout") or default_timeout)) as r:
-            raw = r.read()
+        raw, _ctype, used_proxy = _send(url, data, headers, "POST", cfg,
+                                        float(cfg.get("timeout") or default_timeout))
     except urllib.error.HTTPError as e:
         body = e.read()[:800].decode("utf-8", "replace")
         raise TTSError("小米接口 HTTP %d：%s" % (e.code, _mimo_err(body)), e.code, body)
     except urllib.error.URLError as e:
-        raise TTSError("连不上小米接口：%s" % (e.reason,), detail=str(e.reason))
+        raise TTSError("连不上小米接口：%s｜%s" % (e.reason, _unreachable_hint(url, e.reason)),
+                       detail=str(e.reason))
     except Exception as e:
         raise TTSError("请求小米接口失败：%s" % (e,))
 
@@ -675,3 +712,75 @@ PRESETS = {
 # 下拉顺序：老配置（fish）排最前，小米紧随其后
 _ORDER = ["fish", "mimo", "siliconflow", "openai", "azure", "web"]
 PRESETS = {k: PRESETS[k] for k in _ORDER + [x for x in PRESETS if x not in _ORDER]}
+
+
+# ---------------- 连通性自检 ----------------
+
+def diag(uid, cfg):
+    """探服务器到上游的连通性：DNS → TCP(逐 IP) → HTTP。
+
+    给「连不上上游 / 连不上小米接口」定位用：能一眼看出是 DNS 解析不了、
+    IPv6 没出口、代理挂了，还是上游明确拒绝（401/403）。
+    上游只要有 HTTP 应答就算「通」，不需要有效 key。
+    """
+    url = (cfg.get("url") or "").strip()
+    if is_mimo(cfg) and not url:
+        url = (PRESETS.get("mimo") or {}).get("url") or "https://api.xiaomimimo.com/v1/chat/completions"
+    proxy = (cfg.get("proxy") or "").strip()
+    out = {
+        "provider": cfg.get("provider") or "",
+        "engine": cfg.get("engine") or "",
+        "url": url,
+        "proxy": proxy,
+        "ips": [],
+        "tcp": [],
+        "http": None,
+        "ok": False,
+        "error": "",
+    }
+    p = urllib.parse.urlparse(url)
+    host = p.hostname
+    if not host:
+        out["error"] = "接口地址没填或格式不对（必须以 http 开头）"
+        return out
+    port = p.port or (443 if p.scheme == "https" else 80)
+
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except Exception as e:
+        out["error"] = "DNS 解析失败：%s" % (e,)
+        return out
+
+    seen = set()
+    for fam, _t, _pr, _c, sa in infos:
+        ip = sa[0]
+        if (fam, ip) in seen:
+            continue
+        seen.add((fam, ip))
+        rec = {"family": "IPv4" if fam == socket.AF_INET else "IPv6",
+               "ip": ip, "connect_ms": None, "ok": False, "err": ""}
+        t0 = time.time()
+        try:
+            s = socket.create_connection((ip, port), timeout=6)
+            s.close()
+            rec["ok"] = True
+        except Exception as e:
+            rec["err"] = str(e)
+        rec["connect_ms"] = int((time.time() - t0) * 1000)
+        out["tcp"].append(rec)
+        out["ips"].append(ip)
+
+    try:
+        raw, _ctype, used_proxy = _send(url, None, {}, "GET", cfg, 15)
+        out["http"] = {"status": 200, "bytes": len(raw), "used_proxy": used_proxy}
+        out["ok"] = True
+    except urllib.error.HTTPError as e:
+        # 401/403/405 都说明网络通了，只是没带 key 或方法不对
+        out["http"] = {"status": e.code, "used_proxy": getattr(e, "used_proxy", proxy),
+                       "note": "上游有应答，网络是通的"}
+        out["ok"] = True
+    except Exception as e:
+        out["error"] = "HTTP 请求失败：%s｜%s" % (e, _unreachable_hint(url, e))
+    if out["http"] and proxy and out["http"].get("used_proxy") != proxy:
+        out["note"] = "配置的代理 %s 连不上，已自动退回直连" % proxy
+    return out

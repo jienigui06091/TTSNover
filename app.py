@@ -642,8 +642,11 @@ def _cfg_from_request(uid, d):
     if prov:
         prof = (saved.get("profiles") or {}).get(prov) or {}
         for k, v in {**(tts.PRESETS.get(prov) or {}), **prof}.items():
-            if k != "note" and v not in (None, ""):
-                cfg[k] = v
+            # proxy 例外：小米/硅基流动是直连，空串必须能覆盖掉 fish 预设里的 7890，
+            # 否则服务部署到没有本机代理的机器上会 Connection refused。
+            if k == "note" or (v in (None, "") and k != "proxy"):
+                continue
+            cfg[k] = v
         cfg["provider"] = prov
     return cfg
 
@@ -713,6 +716,17 @@ async def api_tts_test(request: Request):
         out.update(ok=False, error=e.msg, status=e.status, body=e.body,
                    detail=e.detail, ms=int((time.time() - t0) * 1000))
     return out
+
+
+@app.get("/api/tts/diag")
+def api_tts_diag(request: Request):
+    """服务器到上游的连通性自检：App/网页「连不上上游」时先看这里。
+
+    可带 ?provider=mimo 指定要测的引擎；不带就用这个账号已保存的设置。
+    """
+    uid = uid_of(request)
+    prov = (request.query_params.get("provider") or "").strip()
+    return tts.diag(uid, _tts_cfg(uid, {"provider": prov} if prov else {}))
 
 
 @app.get("/api/tts/cache")
